@@ -9,6 +9,8 @@ import igev_wrapper
 import raft_wrapper
 import cupy as cp
 import time
+from cupyx import scatter_add
+import view_synthesis
 
 count = 1
 
@@ -20,164 +22,7 @@ def calculate_disparity(left_image, right_image, model):
     
     return 
 
-def GPU_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
-    # Convert images to RGB (CPU operation)
-    imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
-    imgR_rgb = cv2.cvtColor(imgR, cv2.COLOR_BGR2RGB)
 
-    # Transfer data to GPU
-    imgL_rgb_gpu = cp.array(imgL_rgb)
-    imgR_rgb_gpu = cp.array(imgR_rgb)
-    disparityLR_gpu = cp.array(disparityLR)
-    disparityRL_gpu = cp.array(disparityRL)
-
-    height, width = imgL.shape[:2]
-
-    imgIL = cp.zeros((height, width, 3), dtype=cp.uint8)
-    imgIR = cp.zeros((height, width, 3), dtype=cp.uint8)
-    imgI = cp.zeros((height, width, 3), dtype=cp.uint8)
-
-    disparityIL = cp.full((height, width), -1, dtype=cp.float32)
-    disparityIR = cp.full((height, width), -1, dtype=cp.float32)
-
-    # Calculate disparityIL
-    x_coords = cp.arange(width)
-    y_coords = cp.arange(height)
-    xv, yv = cp.meshgrid(x_coords, y_coords)
-
-    new_x_IL = cp.clip(cp.floor(xv - alpha * disparityLR_gpu).astype(cp.int32), 0, width - 1)
-    disparityIL[yv, new_x_IL] = alpha * disparityLR_gpu[yv, xv]
-
-    plt.imshow(cp.asnumpy(disparityIL))
-    plt.show()
-
-    # Fill holes in disparityIL using a median filter
-    for i in range(3):  # Perform iterative smoothing
-        mask_invalid = (disparityIL == -1)
-        disparityIL = cp.where(
-            mask_invalid,
-            (cp.roll(disparityIL, 1, axis=1) + cp.roll(disparityIL, -1, axis=1)) / 2,
-            disparityIL
-        )
-
-    # Populate imgIL
-    valid_disp_IL = disparityIL >= 0
-    x_offset_IL = cp.round(disparityIL).astype(cp.int32)
-    valid_x_IL = cp.clip(xv + x_offset_IL, 0, width - 1)
-    imgIL[yv, xv] = cp.where(valid_disp_IL[:, :, None], imgL_rgb_gpu[yv, valid_x_IL], 0)
-
-    # Calculate disparityIR
-    new_x_IR = cp.clip(cp.floor(xv + (1 - alpha) * disparityRL_gpu).astype(cp.int32), 0, width - 1)
-    disparityIR[yv, new_x_IR] = cp.where(disparityRL_gpu >= 0, (1 - alpha) * disparityRL_gpu[yv, xv], -1)
-
-    # Fill holes in disparityIR using a median filter
-    for i in range(3):  # Perform iterative smoothing
-        mask_invalid = (disparityIR == -1)
-        disparityIR = cp.where(
-            mask_invalid,
-            (cp.roll(disparityIR, 1, axis=1) + cp.roll(disparityIR, -1, axis=1)) / 2,
-            disparityIR
-        )
-
-    # Populate imgIR
-    valid_disp_IR = disparityIR >= 0
-    x_offset_IR = cp.round(disparityIR).astype(cp.int32)
-    valid_x_IR = cp.clip(xv - x_offset_IR, 0, width - 1)
-    imgIR[yv, xv] = cp.where(valid_disp_IR[:, :, None], imgR_rgb_gpu[yv, valid_x_IR], 0)
-
-    # Combine imgIL and imgIR into imgI
-    valid_IL = disparityIL >= 0
-    valid_IR = disparityIR >= 0
-    use_IL = cp.logical_and(valid_IL, ~valid_IR) | (cp.abs(disparityIL) <= cp.abs(disparityIR))
-    imgI = cp.where(use_IL[:, :, None], imgIL, imgIR)
-
-    # Transfer result back to CPU
-    imgI_cpu = cp.asnumpy(imgI)
-    disparityIL_cpu = cp.asnumpy(disparityIL)
-    disparityIR_cpu = cp.asnumpy(disparityIR)
-    imgIL_cpu = cp.asnumpy(imgIL)
-    imgIR_cpu = cp.asnumpy(imgIR)
-    return imgI_cpu, disparityIL_cpu, disparityIR_cpu, imgIL_cpu, imgIR_cpu
-
-
-def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
-    imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
-    imgR_rgb = cv2.cvtColor(imgR, cv2.COLOR_BGR2RGB)
-    if(alpha == 0):
-        return imgL_rgb, disparityLR, disparityRL, imgL, imgR
-    elif (alpha == 1):
-        return imgR_rgb, disparityLR, disparityRL, imgL, imgR
-
-    imgIR = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
-    imgIL = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
-    imgI = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
-
-    height, width = imgR.shape[:2]
-
-    disparityIL = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
-    disparityIR = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
-
-    for y in range(height):
-        for x in range(width):
-            disparity = disparityLR[y, x]
-            newX = math.floor(x - alpha*disparity)
-            newX = max(0, min(newX, width-1))
-            disparityIL[y,newX] = alpha*disparity
-
-    # Fill holes
-    for y in range(height):
-        for x in range(1,width-1):
-            if ((np.std([disparityIL[y,x-1], disparityIL[y,x], disparityIL[y,x+1]]) > 20 or disparityIL[y,x] == -1) and np.std([disparityIL[y,x-1], disparityIL[y,x+1]]) < 3):
-                disparityIL[y,x] = np.average([disparityIL[y,x-1], disparityIL[y,x+1]])
-
-    for y in range(height):
-        for x in range(width):
-            if (disparityIL[y, x] >= 0):
-                imgIL[y, x] = imgL_rgb[y, x + int(np.round(disparityIL[y, x]))]
-
-
-    for y in range(height):
-        for x in range(width-1, -1, -1):
-            disparity = disparityRL[y, x]
-            newX = math.floor(x + (1-alpha)*disparity)
-            newX = max(0, min(newX, width-1))
-            disparityIR[y,newX] = (1-alpha)*disparity
-
-    # Fill holes
-    for y in range(height):
-        for x in range(1,width-1):
-            if ((np.std([disparityIR[y,x-1], disparityIR[y,x], disparityIR[y,x+1]]) > 20 or disparityIR[y,x] == -1) and np.std([disparityIR[y,x-1], disparityIR[y,x+1]]) < 3):
-                disparityIR[y,x] = np.average([disparityIR[y,x-1], disparityIR[y,x+1]])
-
-    for y in range(height):
-        for x in range(width):
-            if (disparityIR[y, x] >= 0):
-                imgIR[y, x] = imgR_rgb[y, x - int(np.round(disparityIR[y, x]))]
-
-
-    # round disparities
-    disparityIL = np.round(disparityIL).astype(int)
-    disparityIR = np.round(disparityIR).astype(int)
-
-    for y in range(height):
-        for x in range(width):
-            if(x == 34 and y == 105):
-                print("here")
-                print(disparityIL[y, x])
-                print(disparityIR[y, x])
-            if (not np.array_equal(disparityIL[y, x], [-1]) and not np.array_equal(disparityIR[y, x], [-1])):
-                if (abs(disparityIL[y, x]) > abs(disparityIR[y, x])):
-                    imgI[y, x] = imgIL[y, x]
-                elif (np.array_equal(imgIR[y, x], [0, 0, 0]) and not np.array_equal(imgIL[y, x], [0, 0, 0])): # in some case bot have 0 disparities but imgIR also has black pixels
-                    imgI[y, x] = imgIL[y, x]
-                else:
-                    imgI[y, x] = imgIR[y, x]
-            elif (not np.array_equal(disparityIL[y, x], [-1])):
-                imgI[y, x] = imgIL[y, x]
-            elif (not np.array_equal(disparityIR[y, x], [-1])):
-                imgI[y, x] = imgIR[y, x]
-
-    return imgI, disparityIL, disparityIR, imgIL, imgIR
 
 def filter_disparity_map(disparity, min_threshold=5, max_threshold=None, invalid_value=0):
     """
@@ -203,27 +48,91 @@ def filter_disparity_map(disparity, min_threshold=5, max_threshold=None, invalid
     
     return filtered
 
-def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV'):
+def rectify_images(img1, img2):
+    # Step 1: Detect and Match Features
+    orb = cv2.ORB_create()  # Or use cv2.SIFT_create() if OpenCV is built with non-free modules
+    keypoints1, descriptors1 = orb.detectAndCompute(img1, None)
+    keypoints2, descriptors2 = orb.detectAndCompute(img2, None)
+
+    # Match features using a brute-force matcher
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(descriptors1, descriptors2)
+    matches = sorted(matches, key=lambda x: x.distance)
+
+    # Extract the matched keypoints
+    points1 = np.float32([keypoints1[m.queryIdx].pt for m in matches])
+    points2 = np.float32([keypoints2[m.trainIdx].pt for m in matches])
+
+    # Step 2: Compute the Fundamental Matrix
+    F, mask = cv2.findFundamentalMat(points1, points2, cv2.FM_RANSAC)
+
+    # Select inliers
+    points1 = points1[mask.ravel() == 1]
+    points2 = points2[mask.ravel() == 1]
+
+    # Step 3: Compute the Rectification Transform
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+
+    _, H1, H2 = cv2.stereoRectifyUncalibrated(points1, points2, F, imgSize=(w1, h1))
+
+    # Step 4: Warp the Images
+    img1_rectified = cv2.warpPerspective(img1, H1, (w1, h1))
+    img2_rectified = cv2.warpPerspective(img2, H2, (w2, h2))
+
+    return img1_rectified, img2_rectified
+
+def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_down_imgs = False):
+    wholeTime = time.time()
     print('Starting')
     imgL = cv2.imread(left_image_path)
     imgR = cv2.imread(right_image_path)
 
     # downscale
     imgL = cv2.resize(imgL, None, fx=donwscale, fy=donwscale)
-    # imgL = cv2.rotate(imgL, cv2.ROTATE_90_CLOCKWISE)
     imgR = cv2.resize(imgR, None, fx=donwscale, fy=donwscale)
-    # imgR = cv2.rotate(imgR, cv2.ROTATE_90_CLOCKWISE)
+    height, width = imgR.shape[:2]
+    if(top_down_imgs):
+        imgL = cv2.rotate(imgL, cv2.ROTATE_90_CLOCKWISE)
+        imgR = cv2.rotate(imgR, cv2.ROTATE_90_CLOCKWISE)
     # print(imgL.shape[:2])
 
-    # call wrapper
-    disparityLR, disparityRL = calculate_disparity(imgL, imgR, model)
+    # rect_imgL, rect_imgR = rectify_images(imgL, imgR)
 
-    # plt.imshow(disparityLR)
+    # plt.subplot(2, 2, 1)  # (rows, columns, index)
+    # plt.imshow(imgL)
+    # plt.title('Left Image')
+    # plt.axis('off')
+
+    # plt.subplot(2, 2, 2)  # (rows, columns, index)
+    # plt.imshow(imgR)
+    # plt.title('Right Image')
+    # plt.axis('off')
+
+    # plt.subplot(2, 2, 3)  # (rows, columns, index)
+    # plt.imshow(rect_imgL)
+    # plt.title('Right Image')
+    # plt.axis('off')
+
+    # plt.subplot(2, 2, 4)  # (rows, columns, index)
+    # plt.imshow(rect_imgR)
+    # plt.title('Right Image')
+    # plt.axis('off')
     # plt.show()
-    # disparityLR = filter_disparity_map(disparityLR, 310, None, 0)
-    # disparityRL = filter_disparity_map(disparityRL, 310, None, 0)
-    # plt.imshow(disparityLR)
-    # plt.show()
+    # return
+    # call wrapper
+    start = time.time()
+    disparityLR, disparityRL = calculate_disparity(imgL, imgR, model)
+    print("disparity calculator " + str(time.time() - start))
+
+    plt.imshow(disparityLR)
+    plt.show()
+    disparityLR = filter_disparity_map(disparityLR, 120, None, 0)
+    disparityRL = filter_disparity_map(disparityRL, 120, None, 0)
+    plt.imshow(disparityLR)
+    plt.show()
+    plt.imshow(disparityRL)
+    plt.show()
 
     imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
     imgR_rgb = cv2.cvtColor(imgR, cv2.COLOR_BGR2RGB)
@@ -232,7 +141,6 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV'):
     imgIL = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
     imgI = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
 
-    height, width = imgR.shape[:2]
 
     alpha = 0.5
 
@@ -348,18 +256,38 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV'):
 
     start = time.time()
     # imgI, disparityIL, disparityIR, imgIL, imgIR  = GPU_intermediate_view(imgL, imgR, disparityLR, disparityRL, 0.5)
-    # inter_values = np.linspace(0, 1, 11)
-    # for value in inter_values:
-    #     value = round(value, 1)
-    #     imgI, disparityIL, disparityIR, imgIL, imgIR  = create_intermediate_view(imgL, imgR, disparityLR, disparityRL, value)
-    #     imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
-    #     filename = f"img_{value}.png"
-    #     cv2.imwrite(filename, imgI)
-    # print(time.time() - start)
-    imgI, disparityIL, disparityIR, imgIL, imgIR  = create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha)
+    # Define the codec and create VideoWriter object
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+    appendFilename = "topDown" if top_down_imgs else "leftRight"
+    filename = f"img_{model}_{appendFilename}.mp4"
+    video_writer = cv2.VideoWriter(filename, fourcc, 20, (width, height))
+    inter_values = np.linspace(0, 1, 101)
+    for value in inter_values:
+        value = round(value, 2)
+        print("value " + str(value))
+        imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, value)
+        imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
+        if(top_down_imgs):
+            imgI = cv2.rotate(imgI, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # filename = f"img_{model}_{value}.png"
+        # cv2.imwrite(filename, imgI)
+        video_writer.write(imgI)
+    video_writer.release()
+    # imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, 0.5)
+    # print("Calculation of middle " + str(time.time() - start))
+    print("Whole time " + str(time.time() - wholeTime))
     # #imgI = cv.fastNlMeansDenoisingColored(imgI,None,10,10,7,12)
     # Display imgL
-    plt.subplot(3, 3, 1)  # (rows, columns, index)
+    if(top_down_imgs):
+        imgI = cv2.rotate(imgI, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        imgL_rgb = cv2.rotate(imgL_rgb, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        imgR_rgb = cv2.rotate(imgR_rgb, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        disparityIL = cv2.rotate(disparityIL, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        disparityIR = cv2.rotate(disparityIR, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        imgIR = cv2.rotate(imgIR, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        imgIL = cv2.rotate(imgIL, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    plt.subplot(3, 3, 1)  # (rows, columns, index) 
     plt.imshow(imgL_rgb)
     plt.title('Left Image')
     plt.axis('off')
@@ -409,9 +337,10 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV'):
 
 if __name__ == "__main__":
     # func('dataset/1/1/0003.png', 'dataset/1/1/0002.png')
-    model_name = 'IGEV'
-    func('dataset/9/left.png', 'dataset/9/right.png', 1/3, model_name)
-    # func('dataset/2/2/0003.png', 'dataset/2/2/0002.png', 1/3, model_name)
+    model_name = 'RAFT'
+    top_down = True
+    # func('dataset/1/2/right.png', 'dataset/1/2/left.png', 1/3, model_name)
+    func('dataset/1/2/0004.png', 'dataset/1/2/0005.png', 1/3, model_name, top_down)
     # func('dataset/3/2/0003.png', 'dataset/3/2/0002.png', 1/3, model_name)
     # func('dataset/4/2/0003.png', 'dataset/4/2/0002.png', 1/3, model_name)
     # func('dataset/5/2/0003.png', 'dataset/5/2/0002.png', 1/3, model_name)

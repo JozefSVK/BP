@@ -344,6 +344,20 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     disparityIL = np.round(disparityIL).astype(int)
     disparityIR = np.round(disparityIR).astype(int)
 
+    # remove ghosting
+    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 5)
+    boundaryIL = detect_EOBMV(disparityIL, 5)
+    combined_boundary = cv2.bitwise_and(boundaryLR, boundaryIL)
+
+    disparityIL[combined_boundary == 1] = -1
+
+    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 5)
+    boundaryIR = detect_EOBMV(disparityIR, 5)
+    combined_boundary = cv2.bitwise_and(boundaryRL, boundaryIR)
+
+    disparityIR[combined_boundary == 1] = -1
+
+
     # imgI = combine_images_gpu(imgIL, imgIR, disparityIL, disparityIR)
     for y in range(height):
         for x in range(width):
@@ -365,3 +379,99 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
                 imgI[y, x] = imgIR[y, x]
 
     return imgI, disparityIL, disparityIR, imgIL, imgIR
+
+
+def create_edge_mask(disparity_map, mask_width=3):
+
+    sobelx = cv2.Sobel(disparity_map, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(disparity_map, cv2.CV_64F, 0, 1, ksize=3)
+    magnitude = np.sqrt(sobelx**2 + sobely**2)
+    
+    threshold = np.mean(magnitude) + np.std(magnitude)
+    boundaries = (magnitude > threshold).astype(np.uint8) * 255
+
+    plt.imshow(boundaries)
+    plt.show()
+
+    return boundaries, threshold
+
+# EOBRM https://sci-hub.se/10.1109/TBC.2013.2281658
+def detect_EOBMR(disparity_map, threshold=20, L1=3):
+    """
+    Implements EOBMR boundary detection for disparity maps
+    
+    Args:
+        disparity_map: Input disparity map
+        L1: Size of structuring element (kernel)
+        chi: Threshold for depth difference
+    """
+    # Create structuring element B1
+    B1 = np.ones((L1, L1), np.uint8)
+    
+    # Perform morphological dilation
+    dilated = cv2.dilate(disparity_map, B1)
+
+    # plt.subplot(1, 2, 1)  # (rows, columns, index) 
+    # plt.imshow(disparity_map)
+    # plt.title('normal')
+    # plt.axis('off')
+
+    # plt.subplot(1, 2, 2)  # (rows, columns, index) 
+    # plt.imshow(dilated)
+    # plt.title('dilated')
+    # plt.axis('off')
+    # plt.show()
+    
+    # Calculate difference between dilated and original
+    diff = dilated - disparity_map
+    
+    # Apply threshold to get EOBMR
+    EOBMR = np.where(diff > threshold, 1, 0).astype(np.uint8)
+    
+    return EOBMR, diff
+
+def detect_EOBMV(disparity_map, L1=3):
+    """
+    Detects boundaries at invalid disparity regions (EOBMV)
+    """
+    B1 = np.ones((L1, L1), np.uint8)
+    invalid_regions = (disparity_map == -1).astype(np.uint8)
+    dilated_invalid = cv2.dilate(invalid_regions, B1)
+    EOBMV = cv2.absdiff(dilated_invalid, invalid_regions)
+    return EOBMV
+
+def show_boundary(image, mask):
+    # Ensure the mask is binary (if not, threshold it)
+    _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+
+    # Convert mask to 3-channel (if needed)
+    color_mask = cv2.cvtColor(binary_mask, cv2.COLOR_GRAY2BGR)
+
+    # Assign a color to the mask (e.g., red)
+    color_mask[:, :, 1:] = 0  # Set green and blue channels to 0 (keep only red)
+
+    # Blend the image and the mask
+    blended = cv2.addWeighted(image, 0.7, color_mask, 0.3, 0)
+
+    plt.imshow(blended)
+    plt.show()
+
+def refine_boundaries(disparity_map, discontinuity_mask, stable_distance=2):
+    refined_map = disparity_map.copy()
+    
+    # Iterate over all detected discontinuity pixels
+    rows, cols = discontinuity_mask.shape
+    for y in range(rows):
+        for x in range(cols):
+            if discontinuity_mask[y, x]:
+                # Move to a stable region
+                stable_x = max(0, x - stable_distance)
+                stable_disparity = disparity_map[y, stable_x]
+                
+                # Update the disparity map at the boundary
+                refined_map[y, x] = stable_disparity
+    
+    # Optional: Apply smoothing
+    refined_map = cv2.bilateralFilter(refined_map.astype(np.float32), d=5, sigmaColor=50, sigmaSpace=50)
+
+    return refined_map

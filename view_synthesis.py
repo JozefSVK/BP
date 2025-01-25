@@ -285,12 +285,22 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
 
     # Fill holes
     disparityIL = fill_disparity_holes_gpu(disparityIL, 20, 3)
+    disparityIL_helper = np.round(disparityIL)
+    # # remove ghosting
+    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 5)
+    boundaryIL = detect_EOBMV(disparityIL_helper, 5)
+    combined_boundary = cv2.bitwise_and(boundaryLR, boundaryIL)
+
+    # smooth the edges
+    disparityIL = blur_boundaries(disparityIL)
+    disparityIL = clean_disparity_map(disparityIL)
     # for y in range(height):
     #     for x in range(1,width-1):
     #         if ((np.std([disparityIL[y,x-1], disparityIL[y,x], disparityIL[y,x+1]]) > 20 or disparityIL[y,x] == -1) and np.std([disparityIL[y,x-1], disparityIL[y,x+1]]) < 3):
     #             disparityIL[y,x] = np.average([disparityIL[y,x-1], disparityIL[y,x+1]])
 
     imgIL = warp_image_cv2(imgL_rgb, disparityIL, 1, alpha)
+    disparityIL[combined_boundary == 1] = -1
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIL[y, x] >= 0):
@@ -305,27 +315,40 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
 
     # Fill holes
     disparityIR = fill_disparity_holes_gpu(disparityIR, 20, 3)
+    disparityIR_helper = np.round(disparityIR)
+    # remove ghosting
+    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 5)
+    boundaryIR = detect_EOBMV(disparityIR_helper, 5)
+    combined_boundary = cv2.bitwise_and(boundaryRL, boundaryIR)
+
+    # smooth the edges
+    disparityIR = blur_boundaries(disparityIR)
+    disparityIR = clean_disparity_map(disparityIR)
     # for y in range(height):
     #     for x in range(1,width-1):
     #         if ((np.std([disparityIR[y,x-1], disparityIR[y,x], disparityIR[y,x+1]]) > 20 or disparityIR[y,x] == -1) and np.std([disparityIR[y,x-1], disparityIR[y,x+1]]) < 3):
     #             disparityIR[y,x] = np.average([disparityIR[y,x-1], disparityIR[y,x+1]])
     start = time.time()
+
     imgIR = warp_image_cv2(imgR_rgb, disparityIR, -1, (1-alpha))
+    disparityIR[combined_boundary == 1] = -1
+    plt.imshow(imgIR)
+    plt.show()
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIR[y, x] >= 0):
     #             imgIR_copy[y, x] = imgR_rgb[y, x - int(np.round(disparityIR[y, x]))]
 
     # Compute the absolute difference
-    difference = cv2.absdiff(imgIR, imgIR_copy)
+    # difference = cv2.absdiff(imgIR, imgIR_copy)
 
-    # Create a binary mask of differences
-    grayscale_diff = cv2.cvtColor(difference, cv2.COLOR_BGR2GRAY)
-    _, binary_mask = cv2.threshold(grayscale_diff, 50, 255, cv2.THRESH_BINARY)
+    # # Create a binary mask of differences
+    # grayscale_diff = cv2.cvtColor(difference, cv2.COLOR_BGR2GRAY)
+    # _, binary_mask = cv2.threshold(grayscale_diff, 50, 255, cv2.THRESH_BINARY)
 
-    # Highlight differences in the original images
-    highlighted_diff = imgIR.copy()
-    highlighted_diff[binary_mask > 0] = [0, 0, 255]  # Highlight differences in red
+    # # Highlight differences in the original images
+    # highlighted_diff = imgIR.copy()
+    # highlighted_diff[binary_mask > 0] = [0, 0, 255]  # Highlight differences in red
 
     # plt.subplot(2, 2, 3)
     # plt.title("Difference (Grayscale)")
@@ -341,33 +364,64 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     # plt.show()
 
     # round disparities
-    disparityIL = np.round(disparityIL).astype(int)
-    disparityIR = np.round(disparityIR).astype(int)
+    disparityIL = np.round(disparityIL)
+    disparityIR = np.round(disparityIR)
+
+    disparity_normalized = cv2.normalize(disparityIR, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    
+    # Create color disparity map
+    disparity_color = cv2.applyColorMap(disparity_normalized, cv2.COLORMAP_JET)
+    
+    # Create red overlay for boundaries
+    boundary_overlay = np.zeros_like(disparity_color)
+    boundary_overlay[combined_boundary == 1] = [0, 0, 255]  # Red color
+    
+    # Combine images
+    result = cv2.addWeighted(disparity_color, 1, boundary_overlay, 0.5, 0)
+    
+    # Display
+    plt.figure(figsize=(10, 5))
+    plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+    plt.title('Disparity Map with Boundaries')
+    plt.axis('off')
+    plt.show()
 
     # remove ghosting
-    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 5)
-    boundaryIL = detect_EOBMV(disparityIL, 5)
-    combined_boundary = cv2.bitwise_and(boundaryLR, boundaryIL)
+    # boundaryLR, diff = detect_EOBMR(disparityLR, 70, 5)
+    # boundaryIL = detect_EOBMV(disparityIL, 5)
+    # combined_boundary = cv2.bitwise_and(boundaryLR, boundaryIL)
 
-    disparityIL[combined_boundary == 1] = -1
+    # disparityIL[combined_boundary == 1] = -1
 
-    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 5)
-    boundaryIR = detect_EOBMV(disparityIR, 5)
-    combined_boundary = cv2.bitwise_and(boundaryRL, boundaryIR)
+    # boundaryRL, diff = detect_EOBMR(disparityRL, 70, 5)
+    # boundaryIR = detect_EOBMV(disparityIR, 5)
+    # combined_boundary = cv2.bitwise_and(boundaryRL, boundaryIR)
 
-    disparityIR[combined_boundary == 1] = -1
+    # disparityIR[combined_boundary == 1] = -1
+    
 
 
-    # imgI = combine_images_gpu(imgIL, imgIR, disparityIL, disparityIR)
+    check_pixels = np.zeros((imgL.shape[0], imgL.shape[1], 1), np.uint8)
+
+    start = time.time()
+    # imgI = optimize_disparity_merge(imgIL, imgIR, disparityIL, disparityIR, alpha)
     for y in range(height):
         for x in range(width):
             if (not np.array_equal(disparityIL[y, x], [-1]) and not np.array_equal(disparityIR[y, x], [-1])):
-                if(abs(disparityIL[y, x] - disparityIR[y, x]) < 15):
-                    if(disparityIL[y, x]*alpha > (1-alpha)*disparityIR[y, x]):
+                if(not np.array_equal(disparityIL[y, x], [0]) and not np.array_equal(disparityIR[y, x], [0]) and abs(disparityIL[y, x] - disparityIR[y, x]) < 20):
+                    check_pixels[y, x] = 1
+                    # diff = np.mean(np.abs(imgIL[y, x] - imgIR[y, x]))
+                    # if(diff > 250):
+                    #     imgI[y, x] = [0,0, 255]
+                    # else:
+                    #     interpolated = alpha * imgIL[y, x] + (1 - alpha) * imgIR[y, x]
+                    #     imgI[y, x] = interpolated.astype(np.uint8)
+                    # imgI[y, x] = alpha*imgIL[y, x] + (1-alpha)*imgIR[y, x]
+                    if(disparityIL[y, x]*(1-alpha) > (alpha)*disparityIR[y, x]):
                         imgI[y, x] = imgIL[y, x]
                     else:
                         imgI[y, x] = imgIR[y, x]
-                if (abs(disparityIL[y, x]) > abs(disparityIR[y, x])):
+                elif (abs(disparityIL[y, x]) > abs(disparityIR[y, x])):
                     imgI[y, x] = imgIL[y, x]
                 elif (np.array_equal(imgIR[y, x], [0, 0, 0]) and not np.array_equal(imgIL[y, x], [0, 0, 0])): # in some case bot have 0 disparities but imgIR also has black pixels
                     imgI[y, x] = imgIL[y, x]
@@ -378,6 +432,7 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
             elif (not np.array_equal(disparityIR[y, x], [-1])):
                 imgI[y, x] = imgIR[y, x]
 
+    print("Merging " + str(time.time() - start))
     return imgI, disparityIL, disparityIR, imgIL, imgIR
 
 
@@ -427,6 +482,9 @@ def detect_EOBMR(disparity_map, threshold=20, L1=3):
     
     # Apply threshold to get EOBMR
     EOBMR = np.where(diff > threshold, 1, 0).astype(np.uint8)
+
+    # Additional dilation to make boundaries thicker
+    EOBMR = cv2.dilate(EOBMR, np.ones((5,5), np.uint8))
     
     return EOBMR, diff
 
@@ -437,6 +495,7 @@ def detect_EOBMV(disparity_map, L1=3):
     B1 = np.ones((L1, L1), np.uint8)
     invalid_regions = (disparity_map == -1).astype(np.uint8)
     dilated_invalid = cv2.dilate(invalid_regions, B1)
+    dilated_invalid = cv2.dilate(dilated_invalid, np.ones((3,3), np.uint8))
     EOBMV = cv2.absdiff(dilated_invalid, invalid_regions)
     return EOBMV
 
@@ -475,3 +534,82 @@ def refine_boundaries(disparity_map, discontinuity_mask, stable_distance=2):
     refined_map = cv2.bilateralFilter(refined_map.astype(np.float32), d=5, sigmaColor=50, sigmaSpace=50)
 
     return refined_map
+
+
+# def optimize_disparity_merge(imgIL, imgIR, disparityIL, disparityIR, alpha):
+#     imgI = np.zeros_like(imgIL)
+    
+#     # Remove extra dimensions from disparities
+#     disparityIL = disparityIL.squeeze()
+#     disparityIR = disparityIR.squeeze()
+    
+#     # Create masks
+#     valid_mask = (disparityIL != -1) & (disparityIR != -1)
+#     valid_disparity = (disparityIL != 0) & (disparityIR != 0)
+#     disparity_diff = np.abs(disparityIL - disparityIR) < 20
+    
+#     condition1 = valid_mask & valid_disparity & disparity_diff
+#     disparity_weight_mask = (disparityIL * alpha) < ((1 - alpha) * disparityIR)
+    
+    
+#     # Expand masks for 3D image arrays
+#     condition1 = condition1[..., np.newaxis]
+#     disparity_weight_mask = disparity_weight_mask[..., np.newaxis]
+    
+#     # Apply conditions
+#     imgI = np.where(condition1 & disparity_weight_mask, imgIL, imgI)
+#     imgI = np.where(condition1 & ~disparity_weight_mask, imgIR, imgI)
+    
+#     # Handle remaining cases
+#     disparity_compare = (np.abs(disparityIL) > np.abs(disparityIR))[..., np.newaxis]
+#     black_pixels = (np.all(imgIR == [0, 0, 0], axis=-1) & ~np.all(imgIL == [0, 0, 0], axis=-1))[..., np.newaxis]
+    
+#     remaining_mask = valid_mask[..., np.newaxis] & ~condition1
+#     imgI = np.where(remaining_mask & disparity_compare, imgIL, imgI)
+#     imgI = np.where(remaining_mask & black_pixels, imgIL, imgI)
+#     imgI = np.where(remaining_mask & ~disparity_compare & ~black_pixels, imgIR, imgI)
+    
+#     # Single valid disparity cases
+#     imgI = np.where((disparityIL != -1)[..., np.newaxis] & (disparityIR == -1)[..., np.newaxis], imgIL, imgI)
+#     imgI = np.where((disparityIR != -1)[..., np.newaxis] & (disparityIL == -1)[..., np.newaxis], imgIR, imgI)
+    
+#     return imgI
+
+def blur_boundaries(disparity_map):
+    # Create a mask for valid disparity values
+    valid_mask = (disparity_map != -1).astype(np.uint8)
+
+    # Replace -1 with neutral values (e.g., 0) for processing
+    temp_disparity = np.where(disparity_map == -1, 0, disparity_map).astype(np.float32)
+    if temp_disparity.ndim == 3:
+        temp_disparity = temp_disparity.squeeze()
+
+    # Apply median blur to the valid disparity region
+    blurred_disparity = cv2.medianBlur(temp_disparity, 5)
+
+    # Restore -1 values using the mask
+    smoothed_disparity = np.where(valid_mask == 1, blurred_disparity[..., np.newaxis], -1)
+
+    return smoothed_disparity
+
+def clean_disparity_map(disparity_map, min_blob_size=100):
+    # Convert to binary image
+    valid_mask = (disparity_map != -1).astype(np.uint8)
+    
+    # Remove small blobs
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(valid_mask, connectivity=8)
+    
+    # Filter components based on size
+    for label in range(1, num_labels):  # Start from 1 to skip background
+        if stats[label, cv2.CC_STAT_AREA] < min_blob_size:
+            disparity_map[labels == label] = -1
+            
+    # Optional: Apply closing to smooth edges
+    kernel = np.ones((3,3), np.uint8)
+    valid_mask = (disparity_map != -1).astype(np.uint8)
+    valid_mask = cv2.morphologyEx(valid_mask, cv2.MORPH_CLOSE, kernel)
+    
+    # Update disparity map based on mask
+    disparity_map[valid_mask == 0] = -1
+    
+    return disparity_map

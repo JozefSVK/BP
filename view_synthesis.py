@@ -332,8 +332,8 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
 
     imgIR = warp_image_cv2(imgR_rgb, disparityIR, -1, (1-alpha))
     disparityIR[combined_boundary == 1] = -1
-    plt.imshow(imgIR)
-    plt.show()
+    # plt.imshow(imgIR)
+    # plt.show()
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIR[y, x] >= 0):
@@ -367,25 +367,6 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     disparityIL = np.round(disparityIL)
     disparityIR = np.round(disparityIR)
 
-    disparity_normalized = cv2.normalize(disparityIR, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    
-    # Create color disparity map
-    disparity_color = cv2.applyColorMap(disparity_normalized, cv2.COLORMAP_JET)
-    
-    # Create red overlay for boundaries
-    boundary_overlay = np.zeros_like(disparity_color)
-    boundary_overlay[combined_boundary == 1] = [0, 0, 255]  # Red color
-    
-    # Combine images
-    result = cv2.addWeighted(disparity_color, 1, boundary_overlay, 0.5, 0)
-    
-    # Display
-    plt.figure(figsize=(10, 5))
-    plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-    plt.title('Disparity Map with Boundaries')
-    plt.axis('off')
-    plt.show()
-
     # remove ghosting
     # boundaryLR, diff = detect_EOBMR(disparityLR, 70, 5)
     # boundaryIL = detect_EOBMV(disparityIL, 5)
@@ -404,33 +385,32 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     check_pixels = np.zeros((imgL.shape[0], imgL.shape[1], 1), np.uint8)
 
     start = time.time()
-    # imgI = optimize_disparity_merge(imgIL, imgIR, disparityIL, disparityIR, alpha)
-    for y in range(height):
-        for x in range(width):
-            if (not np.array_equal(disparityIL[y, x], [-1]) and not np.array_equal(disparityIR[y, x], [-1])):
-                if(not np.array_equal(disparityIL[y, x], [0]) and not np.array_equal(disparityIR[y, x], [0]) and abs(disparityIL[y, x] - disparityIR[y, x]) < 20):
-                    check_pixels[y, x] = 1
-                    # diff = np.mean(np.abs(imgIL[y, x] - imgIR[y, x]))
-                    # if(diff > 250):
-                    #     imgI[y, x] = [0,0, 255]
-                    # else:
-                    #     interpolated = alpha * imgIL[y, x] + (1 - alpha) * imgIR[y, x]
-                    #     imgI[y, x] = interpolated.astype(np.uint8)
-                    # imgI[y, x] = alpha*imgIL[y, x] + (1-alpha)*imgIR[y, x]
-                    if(disparityIL[y, x]*(1-alpha) > (alpha)*disparityIR[y, x]):
-                        imgI[y, x] = imgIL[y, x]
-                    else:
-                        imgI[y, x] = imgIR[y, x]
-                elif (abs(disparityIL[y, x]) > abs(disparityIR[y, x])):
-                    imgI[y, x] = imgIL[y, x]
-                elif (np.array_equal(imgIR[y, x], [0, 0, 0]) and not np.array_equal(imgIL[y, x], [0, 0, 0])): # in some case bot have 0 disparities but imgIR also has black pixels
-                    imgI[y, x] = imgIL[y, x]
-                else:
-                    imgI[y, x] = imgIR[y, x]
-            elif (not np.array_equal(disparityIL[y, x], [-1])):
-                imgI[y, x] = imgIL[y, x]
-            elif (not np.array_equal(disparityIR[y, x], [-1])):
-                imgI[y, x] = imgIR[y, x]
+    imgI = merge_disparity_views(imgIL, imgIR, disparityIL, disparityIR, alpha)
+    # for y in range(height):
+    #     for x in range(width):
+    #         if (not np.array_equal(disparityIL[y, x], [-1]) and not np.array_equal(disparityIR[y, x], [-1])):
+    #             if(not np.array_equal(disparityIL[y, x], [0]) and not np.array_equal(disparityIR[y, x], [0]) and abs(disparityIL[y, x] - disparityIR[y, x]) < 20):
+    #                 # diff = np.mean(np.abs(imgIL[y, x] - imgIR[y, x]))
+    #                 # if(diff > 250):
+    #                 #     imgI[y, x] = [0,0, 255]
+    #                 # else:
+    #                 #     interpolated = alpha * imgIL[y, x] + (1 - alpha) * imgIR[y, x]
+    #                 #     imgI[y, x] = interpolated.astype(np.uint8)
+    #                 # imgI[y, x] = alpha*imgIL[y, x] + (1-alpha)*imgIR[y, x]
+    #                 if(disparityIL[y, x]*(1-alpha) > (alpha)*disparityIR[y, x]):
+    #                     imgI[y, x] = imgIL[y, x]
+    #                 else:
+    #                     imgI[y, x] = imgIR[y, x]
+    #             elif (abs(disparityIL[y, x]) > abs(disparityIR[y, x])):
+    #                 imgI[y, x] = imgIL[y, x]
+    #             elif (np.array_equal(imgIR[y, x], [0, 0, 0]) and not np.array_equal(imgIL[y, x], [0, 0, 0])): # in some case bot have 0 disparities but imgIR also has black pixels
+    #                 imgI[y, x] = imgIL[y, x]
+    #             else:
+    #                 imgI[y, x] = imgIR[y, x]
+    #         elif (not np.array_equal(disparityIL[y, x], [-1])):
+    #             imgI[y, x] = imgIL[y, x]
+    #         elif (not np.array_equal(disparityIR[y, x], [-1])):
+    #             imgI[y, x] = imgIR[y, x]
 
     print("Merging " + str(time.time() - start))
     return imgI, disparityIL, disparityIR, imgIL, imgIR
@@ -536,44 +516,48 @@ def refine_boundaries(disparity_map, discontinuity_mask, stable_distance=2):
     return refined_map
 
 
-# def optimize_disparity_merge(imgIL, imgIR, disparityIL, disparityIR, alpha):
-#     imgI = np.zeros_like(imgIL)
+def merge_disparity_views(imgIL, imgIR, disparityIL, disparityIR, alpha):
+    # Remove extra dimensions from disparities
+    disparityIL = disparityIL.squeeze()
+    disparityIR = disparityIR.squeeze()
+    # Create masks for valid disparities
+    valid_both = (disparityIL != -1) & (disparityIR != -1)
+    non_zero_both = (disparityIL != 0) & (disparityIR != 0)
+    small_diff = np.abs(disparityIL - disparityIR) < 20
     
-#     # Remove extra dimensions from disparities
-#     disparityIL = disparityIL.squeeze()
-#     disparityIR = disparityIR.squeeze()
+    # Weight comparison mask
+    weight_mask = (disparityIL * (1-alpha)) > ((alpha) * disparityIR)
+
+    # Add channel dimension to masks
+    valid_both = valid_both[..., np.newaxis]
+    non_zero_both = non_zero_both[..., np.newaxis]
+    small_diff = small_diff[..., np.newaxis]
+    weight_mask = weight_mask[..., np.newaxis]
     
-#     # Create masks
-#     valid_mask = (disparityIL != -1) & (disparityIR != -1)
-#     valid_disparity = (disparityIL != 0) & (disparityIR != 0)
-#     disparity_diff = np.abs(disparityIL - disparityIR) < 20
+    # Create initial output array
+    imgI = np.zeros_like(imgIL)
     
-#     condition1 = valid_mask & valid_disparity & disparity_diff
-#     disparity_weight_mask = (disparityIL * alpha) < ((1 - alpha) * disparityIR)
+    # Combine conditions
+    condition1 = valid_both & non_zero_both & small_diff & weight_mask
+    condition2 = valid_both & non_zero_both & small_diff & ~weight_mask
+    condition3 = valid_both & (np.abs(disparityIL[..., np.newaxis]) > np.abs(disparityIR[..., np.newaxis]))
+    condition4 = valid_both & np.all(imgIR == 0, axis=-1)[..., np.newaxis] & ~np.all(imgIL == 0, axis=-1)[..., np.newaxis]
     
+    # Apply conditions
+    imgI = np.where(condition1, imgIL, imgI)
+    imgI = np.where(condition2, imgIR, imgI)
+    imgI = np.where(~(condition1 | condition2) & condition3, imgIL, imgI)
+    imgI = np.where(~(condition1 | condition2 | condition3) & condition4, imgIL, imgI)
+    imgI = np.where(valid_both & ~(condition1 | condition2 | condition3 | condition4), imgIR, imgI)
     
-#     # Expand masks for 3D image arrays
-#     condition1 = condition1[..., np.newaxis]
-#     disparity_weight_mask = disparity_weight_mask[..., np.newaxis]
+    # Handle single valid cases
+    single_valid_L = (disparityIL != -1)[..., np.newaxis] & (disparityIR == -1)[..., np.newaxis]
+    single_valid_R = (disparityIR != -1)[..., np.newaxis] & (disparityIL == -1)[..., np.newaxis]
     
-#     # Apply conditions
-#     imgI = np.where(condition1 & disparity_weight_mask, imgIL, imgI)
-#     imgI = np.where(condition1 & ~disparity_weight_mask, imgIR, imgI)
+    imgI = np.where(single_valid_L, imgIL, imgI)
+    imgI = np.where(single_valid_R, imgIR, imgI)
     
-#     # Handle remaining cases
-#     disparity_compare = (np.abs(disparityIL) > np.abs(disparityIR))[..., np.newaxis]
-#     black_pixels = (np.all(imgIR == [0, 0, 0], axis=-1) & ~np.all(imgIL == [0, 0, 0], axis=-1))[..., np.newaxis]
-    
-#     remaining_mask = valid_mask[..., np.newaxis] & ~condition1
-#     imgI = np.where(remaining_mask & disparity_compare, imgIL, imgI)
-#     imgI = np.where(remaining_mask & black_pixels, imgIL, imgI)
-#     imgI = np.where(remaining_mask & ~disparity_compare & ~black_pixels, imgIR, imgI)
-    
-#     # Single valid disparity cases
-#     imgI = np.where((disparityIL != -1)[..., np.newaxis] & (disparityIR == -1)[..., np.newaxis], imgIL, imgI)
-#     imgI = np.where((disparityIR != -1)[..., np.newaxis] & (disparityIL == -1)[..., np.newaxis], imgIR, imgI)
-    
-#     return imgI
+    return imgI
 
 def blur_boundaries(disparity_map):
     # Create a mask for valid disparity values

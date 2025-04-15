@@ -7,6 +7,21 @@ from cupyx import scatter_add
 import math
 
 
+def get_foreground_disparity(disparity):
+    disparity_8bit = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    _, foreground_mask_otsu = cv2.threshold(disparity_8bit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Clean up the mask using morphological operations
+    kernel = np.ones((5, 5), np.uint8)
+    foreground_mask_cleaned = cv2.morphologyEx(foreground_mask_otsu, cv2.MORPH_OPEN, kernel)
+    foreground_mask_cleaned = cv2.morphologyEx(foreground_mask_cleaned, cv2.MORPH_CLOSE, kernel)
+
+    # Extract foreground from original image (if needed)
+    foreground_only = cv2.bitwise_and(disparity, disparity, mask=foreground_mask_cleaned)
+
+    return foreground_only
+
+
 def GPU_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     # Convert images to RGB (CPU operation)
     imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
@@ -274,22 +289,59 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
 
     # disparityIL = warp_disparity_gpu(disparityLR, alpha, height, width)
     start = time.time()
+    # remove ghosting
+    foreground_disparity = get_foreground_disparity(disparityLR)
+    disparityIL_helper = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
+    for y in range(height):
+        for x in range(width):
+            if(foreground_disparity[y,x]):
+                disparity = foreground_disparity[y, x]
+                newX = math.floor(x - alpha*disparity)
+                newX = max(0, min(newX, width-1))
+                disparityIL_helper[y,newX] = disparity
+
+
+    disparityIL_helper = fill_disparity_holes_gpu(disparityIL_helper, 20, 3)
+    disparityIL_helper = np.round(disparityIL_helper)
+
+    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 10)
+    # boundaryIL = detect_EOBMV(disparityIL_helper, 5)
+    combined_boundary = cv2.bitwise_and(boundaryLR, (disparityIL_helper == -1).astype(np.uint8))
+
+    disparityLR[combined_boundary == 1] = 0
+    
     # disparityIL = generate_intermediate_disparity(disparityLR, alpha, -1)
     for y in range(height):
         for x in range(width):
-            disparity = disparityLR[y, x]
-            newX = math.floor(x - alpha*disparity)
-            newX = max(0, min(newX, width-1))
-            disparityIL[y,newX] = disparity
+            if disparityLR[y, x]:
+                disparity = disparityLR[y, x]
+                newX = math.floor(x - alpha*disparity)
+                newX = max(0, min(newX, width-1))
+                disparityIL[y,newX] = disparity
     # print("Intermediate disparity " + str(time.time() - start))
 
     # Fill holes
     disparityIL = fill_disparity_holes_gpu(disparityIL, 20, 3)
-    disparityIL_helper = np.round(disparityIL)
-    # # remove ghosting
-    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 5)
-    boundaryIL = detect_EOBMV(disparityIL_helper, 5)
-    combined_boundary = cv2.bitwise_and(boundaryLR, boundaryIL)
+    # disparityIL_helper = np.round(disparityIL)
+    
+    # combined_boundary = cv2.bitwise_or(boundaryLR, combined_boundary)
+
+    # plt.subplot(1, 2, 1)  # (rows, columns, index) 
+    # plt.imshow(disparityLR)
+    # plt.title('Left Image')
+    # plt.axis('off')
+
+    # # Display imgR
+    # plt.subplot(1, 2, 2)
+    # plt.imshow(disparityIL_helper)
+    # plt.title('Right Image')
+    # plt.axis('off')
+    # plt.show()
+
+    # visualize_boundaries(imgL_rgb, boundaryLR, "Boundary LR")
+    # visualize_boundaries(imgL_rgb, boundaryIL, "Boundary IL")
+    # visualize_boundaries(imgL_rgb, combined_boundary, "Combined boundary")
+    # visualize_combined_boundaries(imgL_rgb, boundaryLR, boundaryIL)
 
     # smooth the edges
     disparityIL = blur_boundaries(disparityIL)
@@ -300,26 +352,47 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     #             disparityIL[y,x] = np.average([disparityIL[y,x-1], disparityIL[y,x+1]])
 
     imgIL = warp_image_cv2(imgL_rgb, disparityIL, 1, alpha)
-    disparityIL[combined_boundary == 1] = -1
+    # disparityIL[combined_boundary == 1] = -1
+    # visualize_boundaries(imgIL, boundaryIL, "Boundary IL")
+    # visualize_boundaries(imgIL, combined_boundary, "Combined Boundaries")
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIL[y, x] >= 0):
     #             imgIL[y, x] = imgL_rgb[y, x + int(np.round(disparityIL[y, x]))]
 
+    foreground_disparity = get_foreground_disparity(disparityRL)
+    disparityIR_helper = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
+    for y in range(height):
+        for x in range(width):
+            if(foreground_disparity[y,x]):
+                disparity = foreground_disparity[y, x]
+                newX = math.floor(x + (1-alpha)*disparity)
+                newX = max(0, min(newX, width-1))
+                disparityIR_helper[y,newX] = disparity
+
+    disparityIR_helper = fill_disparity_holes_gpu(disparityIR_helper, 20, 3)
+    disparityIR_helper = np.round(disparityIR_helper)
+
+    # remove ghosting
+    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 10)
+    # boundaryIR = detect_EOBMV(disparityIR_helper, 5)
+    combined_boundary = cv2.bitwise_and(boundaryRL, (disparityIR_helper == -1).astype(np.uint8))
+
+    disparityRL[combined_boundary == 1] = 0
+
     for y in range(height):
         for x in range(width-1, -1, -1):
-            disparity = disparityRL[y, x]
-            newX = math.floor(x + (1-alpha)*disparity)
-            newX = max(0, min(newX, width-1))
-            disparityIR[y,newX] = disparity
+            if disparityRL[y, x]:
+                disparity = disparityRL[y, x]
+                newX = math.floor(x + (1-alpha)*disparity)
+                newX = max(0, min(newX, width-1))
+                disparityIR[y,newX] = disparity
 
     # Fill holes
     disparityIR = fill_disparity_holes_gpu(disparityIR, 20, 3)
-    disparityIR_helper = np.round(disparityIR)
-    # remove ghosting
-    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 5)
-    boundaryIR = detect_EOBMV(disparityIR_helper, 5)
-    combined_boundary = cv2.bitwise_and(boundaryRL, boundaryIR)
+    
+    
+    
 
     # smooth the edges
     disparityIR = blur_boundaries(disparityIR)
@@ -331,7 +404,7 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     start = time.time()
 
     imgIR = warp_image_cv2(imgR_rgb, disparityIR, -1, (1-alpha))
-    disparityIR[combined_boundary == 1] = -1
+    # disparityIR[combined_boundary == 1] = -1
     # plt.imshow(imgIR)
     # plt.show()
     # for y in range(height):
@@ -464,7 +537,7 @@ def detect_EOBMR(disparity_map, threshold=20, L1=3):
     EOBMR = np.where(diff > threshold, 1, 0).astype(np.uint8)
 
     # Additional dilation to make boundaries thicker
-    EOBMR = cv2.dilate(EOBMR, np.ones((5,5), np.uint8))
+    # EOBMR = cv2.dilate(EOBMR, np.ones((5,5), np.uint8))
     
     return EOBMR, diff
 

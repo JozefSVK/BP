@@ -5,22 +5,16 @@ from scipy.interpolate import interp1d
 import math
 import time
 import PySide6.QtCore
-import igev_wrapper
-import raft_wrapper
 import cupy as cp
 import time
 from cupyx import scatter_add
 import view_synthesis
+import face_morph
+import utilities
 
 count = 1
 
-def calculate_disparity(left_image, right_image, model):
-    if(model == 'IGEV'):
-        return igev_wrapper.run_igev_inference(left_image, right_image)
-    elif(model == 'RAFT'):
-        return raft_wrapper.run_raft_inference(left_image, right_image)
-    
-    return 
+
 
 
 
@@ -82,6 +76,18 @@ def rectify_images(img1, img2):
 
     return img1_rectified, img2_rectified
 
+def remove_pixels(img, disparity, threshold=0):
+    # Create mask where disparity exists (non-zero)
+    mask = disparity <= threshold
+    
+    # Convert to 3-channel mask for color image
+    mask = np.stack([mask] * 3, axis=2)
+    
+    # Apply mask to image
+    masked_image = np.where(mask, img, 0)
+    
+    return masked_image
+
 def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_down_imgs = False):
     wholeTime = time.time()
     print('Starting')
@@ -122,20 +128,52 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
     # return
     # call wrapper
     start = time.time()
-    disparityLR, disparityRL = calculate_disparity(imgL, imgR, model)
+    disparityLR, disparityRL = utilities.calculate_disparity(imgL, imgR, model)
     print("disparity calculator " + str(time.time() - start))
 
     plt.imshow(disparityLR)
     plt.show()
-    disparityLR = filter_disparity_map(disparityLR, 120, None, 0)
-    disparityRL = filter_disparity_map(disparityRL, 120, None, 0)
-    plt.imshow(disparityLR)
-    plt.show()
+    # save_disparity(disparityLR, 'background.png')
+    filter_value = 130
+    # disparityLR = filter_disparity_map(disparityLR, filter_value, None, 0)
+    # disparityRL = filter_disparity_map(disparityRL, filter_value, None, 0)
+    # save_disparity(disparityLR, 'dataset_comparison/raft_realtime.png')
     plt.imshow(disparityRL)
     plt.show()
+    # return
+    # start = time.time()
+    # boundary_mask, depth_diff = view_synthesis.detect_EOBMR(disparityLR, 70, 5)
+    # print("boundary" + str(time.time() - start))
+    # plt.imshow(boundary_mask)
+    # plt.show()
+    # plt.imshow(depth_diff)
+    # plt.show()
+
+
+    # # Option 2: Automatic thresholding using Otsu's method
+    # disparityLR_8bit = cv2.normalize(disparityLR, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    # _, foreground_mask_otsu = cv2.threshold(disparityLR_8bit, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # # Clean up the mask using morphological operations
+    # kernel = np.ones((5, 5), np.uint8)
+    # foreground_mask_cleaned = cv2.morphologyEx(foreground_mask_otsu, cv2.MORPH_OPEN, kernel)
+    # foreground_mask_cleaned = cv2.morphologyEx(foreground_mask_cleaned, cv2.MORPH_CLOSE, kernel)
+
+    # # Extract foreground from original image (if needed)
+    # foreground_only = cv2.bitwise_and(disparityLR, disparityLR, mask=foreground_mask_cleaned)
+
+    # plt.imshow(foreground_only)
+    # plt.show()
+
+    
+
 
     imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
     imgR_rgb = cv2.cvtColor(imgR, cv2.COLOR_BGR2RGB)
+
+    # new_img = remove_pixels(imgL_rgb, disparityLR)
+    # plt.imshow(new_img)
+    # plt.show()
 
     imgIR = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
     imgIL = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
@@ -143,7 +181,6 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
 
 
     alpha = 0.5
-
     # start = time.time()
     # print("Starting")
 
@@ -256,28 +293,57 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
 
     start = time.time()
     # imgI, disparityIL, disparityIR, imgIL, imgIR  = GPU_intermediate_view(imgL, imgR, disparityLR, disparityRL, 0.5)
+
+    
     # Define the codec and create VideoWriter object
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
-    appendFilename = "topDown" if top_down_imgs else "leftRight"
-    filename = f"img_{model}_{appendFilename}.mp4"
-    video_writer = cv2.VideoWriter(filename, fourcc, 20, (width, height))
-    inter_values = np.linspace(0, 1, 101)
-    for value in inter_values:
-        value = round(value, 2)
-        print("value " + str(value))
-        imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, value)
-        imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
-        if(top_down_imgs):
-            imgI = cv2.rotate(imgI, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        # filename = f"img_{model}_{value}.png"
-        # cv2.imwrite(filename, imgI)
-        video_writer.write(imgI)
-    video_writer.release()
-    # imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, 0.5)
+    # fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+    # appendFilename = "topDown" if top_down_imgs else "leftRight"
+    # filename = f"img_{model}_{appendFilename}.mp4"
+    # video_writer = cv2.VideoWriter(filename, fourcc, 20, (width, height))
+    # inter_values = np.linspace(0, 1, 101)
+    # for value in inter_values:
+    #     value = round(value, 2)
+    #     print("value " + str(value))
+    #     imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, value)
+    #     imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
+    #     if(top_down_imgs):
+    #         imgI = cv2.rotate(imgI, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    #     # filename = f"img_{model}_{value}.png"
+    #     # cv2.imwrite(filename, imgI)
+    #     video_writer.write(imgI)
+    # video_writer.release()
+
+
+    imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha)
     # print("Calculation of middle " + str(time.time() - start))
-    print("Whole time " + str(time.time() - wholeTime))
+    print("Whole time " + str(time.time() - start))
     # #imgI = cv.fastNlMeansDenoisingColored(imgI,None,10,10,7,12)
     # Display imgL
+
+    # Detect landmarks
+    # landmarks_left = face_morph.detect_landmarks(imgL_rgb)
+    # landmarks_right = face_morph.detect_landmarks(imgR_rgb)
+    # if landmarks_left is None or landmarks_right is None:
+    #     print("Failed to detect landmarks")
+    # else:
+    #     # Compute intermediate landmarks
+    #     intermediate_landmarks = face_morph.compute_intermediate_landmarks(landmarks_left, landmarks_right)
+        
+    #     # Perform Delaunay triangulation
+    #     delaunay = face_morph.compute_delaunay_triangulation(intermediate_landmarks)
+        
+    #     # Warp both images to the intermediate view
+    #     warped_left, warped_right = face_morph.warp_images_to_intermediate(
+    #         imgL_rgb, imgR_rgb, landmarks_left, landmarks_right, intermediate_landmarks, delaunay
+    #     )
+        
+    #     # Blend the warped images
+    #     synthesized_image = face_morph.alpha_blend(warped_left, warped_right)
+
+    #     imgI = face_morph.merge_image(synthesized_image, imgI)
+
+
+    # rotate iamges if top down view
     if(top_down_imgs):
         imgI = cv2.rotate(imgI, cv2.ROTATE_90_COUNTERCLOCKWISE)
         imgL_rgb = cv2.rotate(imgL_rgb, cv2.ROTATE_90_COUNTERCLOCKWISE)
@@ -287,6 +353,13 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
         imgIR = cv2.rotate(imgIR, cv2.ROTATE_90_COUNTERCLOCKWISE)
         imgIL = cv2.rotate(imgIL, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
+    
+    # save_disparity(disparityLR, "LR_disparity.png")
+    # save_disparity(disparityRL, "RL_disparity.png")
+    # save_disparity(disparityIL, "IL_disparity.png")
+    # save_disparity(disparityIR, "IR_disparity.png")
+
+    # dispaly images
     plt.subplot(3, 3, 1)  # (rows, columns, index) 
     plt.imshow(imgL_rgb)
     plt.title('Left Image')
@@ -326,21 +399,36 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
     plt.title('Processed Image')
     plt.axis('off')
     plt.show()
-    # imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
+    imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
+    # imgIL = cv2.cvtColor(imgIL, cv2.COLOR_BGR2RGB)
+    # imgIR = cv2.cvtColor(imgIR, cv2.COLOR_BGR2RGB)
     # global count
     # filename = f"img{count}.png"
     # cv2.imwrite(filename, imgI)
     # count += 1
+    # cv2.imwrite("R5.png", imgI)
+    # cv2.imwrite("Middle_L.png", imgIL)
+    # cv2.imwrite("Middle_R.png", imgIR)
 
 
+def save_disparity(disparity_map, text):
+    disparity_normalized = (disparity_map - disparity_map.min()) / (disparity_map.max() - disparity_map.min())
 
+    # Scale to 0-255 and convert to uint8
+    disparity_uint8 = (disparity_normalized * 255).astype(np.uint8)
+    cv2.imwrite(text, disparity_uint8)
 
 if __name__ == "__main__":
     # func('dataset/1/1/0003.png', 'dataset/1/1/0002.png')
-    model_name = 'RAFT'
+    model_name = 'IGEV'
     top_down = True
     # func('dataset/1/2/right.png', 'dataset/1/2/left.png', 1/3, model_name)
-    func('dataset/1/2/0004.png', 'dataset/1/2/0005.png', 1/3, model_name, top_down)
+    # func('dataset/real/topL.png', 'dataset/real/topR.png', 1, model_name)
+    # func('dataset/real/botL.png', 'dataset/real/topL.png', 1, model_name, top_down)
+    
+    # func('view1.png', 'view5.png', 1, model_name)
+    # func('im0.png', 'im1.png', 1/2, model_name)
+    # func('dataset/1/2/0004.png', 'dataset/1/2/0005.png', 1/3, model_name, top_down)
     # func('dataset/3/2/0003.png', 'dataset/3/2/0002.png', 1/3, model_name)
     # func('dataset/4/2/0003.png', 'dataset/4/2/0002.png', 1/3, model_name)
     # func('dataset/5/2/0003.png', 'dataset/5/2/0002.png', 1/3, model_name)
@@ -348,5 +436,17 @@ if __name__ == "__main__":
     # func('dataset/7/right.png', 'dataset/7/left.png', 1/3, model_name)
     # func('dataset/8/right.png', 'dataset/8/left.png', 1/3, model_name)
     # func('dataset/9/left.png', 'dataset/9/right.png', 1/3, model_name)
-    # func('dataset/10/0003.png', 'dataset/10/0002.png', 1/3, model_name)
+    # func('dataset/2/0003.png', 'dataset/2/0002.png', 1/3, model_name)
+    # func('dataset/11/0003.png', 'dataset/11/0002.png', 1/3, model_name)
     # compare_disparities('img/2/image.npy', 'img/2/image.png')
+
+    # custom dataset
+    # func('dataset/custom_dataset/bg/BL.jpeg', 'dataset/custom_dataset/bg/TL.jpeg', 1/3, model_name, top_down)
+    # func('dataset/custom_dataset/bg/BR.jpeg', 'dataset/custom_dataset/bg/TR.jpeg', 1/3, model_name, top_down)
+    # func('dataset/custom_res/R25.png', 'dataset/custom_res/L25.png', 1, model_name)
+    # func('dataset/dataset/res/L5.png', 'dataset/dataset/res/R5.png', 1, model_name)
+    # func('dataset/custom_res/R75.png', 'dataset/custom_res/L75.png', 1, model_name)
+    # func('dataset/custom/botL.jpeg', 'dataset/custom/botR.jpeg', 1/3, model_name)
+    func('dataset/custom_dataset/bg/BL.jpeg', 'dataset/custom_dataset/bg/BR.jpeg', 1/3, model_name)
+    # func('dataset/custom_dataset/bg/TL.jpeg', 'dataset/custom_dataset/bg/TR.jpeg', 1/3, model_name)
+

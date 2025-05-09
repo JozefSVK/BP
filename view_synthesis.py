@@ -50,8 +50,8 @@ def GPU_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     new_x_IL = cp.clip(cp.floor(xv - alpha * disparityLR_gpu).astype(cp.int32), 0, width - 1)
     disparityIL[yv, new_x_IL] = alpha * disparityLR_gpu[yv, xv]
 
-    plt.imshow(cp.asnumpy(disparityIL))
-    plt.show()
+    # plt.imshow(cp.asnumpy(disparityIL))
+    # plt.show()
 
     # Fill holes in disparityIL using a median filter
     for i in range(3):  # Perform iterative smoothing
@@ -304,7 +304,8 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     disparityIL_helper = fill_disparity_holes_gpu(disparityIL_helper, 20, 3)
     disparityIL_helper = np.round(disparityIL_helper)
 
-    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 10)
+    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 15)
+    # show_boundary(imgL_rgb, boundaryLR)
     # boundaryIL = detect_EOBMV(disparityIL_helper, 5)
     combined_boundary = cv2.bitwise_and(boundaryLR, (disparityIL_helper == -1).astype(np.uint8))
 
@@ -326,19 +327,19 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     
     # combined_boundary = cv2.bitwise_or(boundaryLR, combined_boundary)
 
-    # plt.subplot(1, 2, 1)  # (rows, columns, index) 
-    # plt.imshow(disparityLR)
-    # plt.title('Left Image')
-    # plt.axis('off')
+    plt.subplot(1, 2, 1)  # (rows, columns, index) 
+    plt.imshow(disparityLR)
+    plt.title('Left Image')
+    plt.axis('off')
 
-    # # Display imgR
-    # plt.subplot(1, 2, 2)
-    # plt.imshow(disparityIL_helper)
-    # plt.title('Right Image')
-    # plt.axis('off')
-    # plt.show()
+    # Display imgR
+    plt.subplot(1, 2, 2)
+    plt.imshow(disparityIL_helper)
+    plt.title('Right Image')
+    plt.axis('off')
+    plt.show()
 
-    # visualize_boundaries(imgL_rgb, boundaryLR, "Boundary LR")
+    visualize_boundaries(imgL_rgb, boundaryLR, "Boundary LR")
     # visualize_boundaries(imgL_rgb, boundaryIL, "Boundary IL")
     # visualize_boundaries(imgL_rgb, combined_boundary, "Combined boundary")
     # visualize_combined_boundaries(imgL_rgb, boundaryLR, boundaryIL)
@@ -354,7 +355,7 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     imgIL = warp_image_cv2(imgL_rgb, disparityIL, 1, alpha)
     # disparityIL[combined_boundary == 1] = -1
     # visualize_boundaries(imgIL, boundaryIL, "Boundary IL")
-    # visualize_boundaries(imgIL, combined_boundary, "Combined Boundaries")
+    visualize_boundaries(imgIL, combined_boundary, "Combined Boundaries")
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIL[y, x] >= 0):
@@ -374,7 +375,7 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     disparityIR_helper = np.round(disparityIR_helper)
 
     # remove ghosting
-    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 10)
+    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 15)
     # boundaryIR = detect_EOBMV(disparityIR_helper, 5)
     combined_boundary = cv2.bitwise_and(boundaryRL, (disparityIR_helper == -1).astype(np.uint8))
 
@@ -498,8 +499,8 @@ def create_edge_mask(disparity_map, mask_width=3):
     threshold = np.mean(magnitude) + np.std(magnitude)
     boundaries = (magnitude > threshold).astype(np.uint8) * 255
 
-    plt.imshow(boundaries)
-    plt.show()
+    # plt.imshow(boundaries)
+    # plt.show()
 
     return boundaries, threshold
 
@@ -550,6 +551,8 @@ def detect_EOBMV(disparity_map, L1=3):
     dilated_invalid = cv2.dilate(invalid_regions, B1)
     dilated_invalid = cv2.dilate(dilated_invalid, np.ones((3,3), np.uint8))
     EOBMV = cv2.absdiff(dilated_invalid, invalid_regions)
+    # Additional dilation to make boundaries thicker
+    EOBMV = cv2.dilate(EOBMV, np.ones((5,5), np.uint8))
     return EOBMV
 
 def show_boundary(image, mask):
@@ -590,46 +593,58 @@ def refine_boundaries(disparity_map, discontinuity_mask, stable_distance=2):
 
 
 def merge_disparity_views(imgIL, imgIR, disparityIL, disparityIR, alpha):
-    # Remove extra dimensions from disparities
     disparityIL = disparityIL.squeeze()
     disparityIR = disparityIR.squeeze()
-    # Create masks for valid disparities
+    
+    # Basic masks
+    invalid_both = ((disparityIL == -1) & (disparityIR == -1)).astype(np.uint8) * 255
     valid_both = (disparityIL != -1) & (disparityIR != -1)
     non_zero_both = (disparityIL != 0) & (disparityIR != 0)
     small_diff = np.abs(disparityIL - disparityIR) < 20
     
-    # Weight comparison mask
-    weight_mask = (disparityIL * (1-alpha)) > ((alpha) * disparityIR)
-
-    # Add channel dimension to masks
-    valid_both = valid_both[..., np.newaxis]
-    non_zero_both = non_zero_both[..., np.newaxis]
-    small_diff = small_diff[..., np.newaxis]
-    weight_mask = weight_mask[..., np.newaxis]
+    # Black pixel detection
+    black_IR = np.all(imgIR == 0, axis=2)
+    black_IL = np.all(imgIL == 0, axis=2)
     
-    # Create initial output array
     imgI = np.zeros_like(imgIL)
     
-    # Combine conditions
-    condition1 = valid_both & non_zero_both & small_diff & weight_mask
-    condition2 = valid_both & non_zero_both & small_diff & ~weight_mask
-    condition3 = valid_both & (np.abs(disparityIL[..., np.newaxis]) > np.abs(disparityIR[..., np.newaxis]))
-    condition4 = valid_both & np.all(imgIR == 0, axis=-1)[..., np.newaxis] & ~np.all(imgIL == 0, axis=-1)[..., np.newaxis]
+    # Interpolation mask for similar disparities
+    interpolate_mask = np.expand_dims(valid_both & non_zero_both & small_diff, axis=2)
     
-    # Apply conditions
-    imgI = np.where(condition1, imgIL, imgI)
-    imgI = np.where(condition2, imgIR, imgI)
-    imgI = np.where(~(condition1 | condition2) & condition3, imgIL, imgI)
-    imgI = np.where(~(condition1 | condition2 | condition3) & condition4, imgIL, imgI)
-    imgI = np.where(valid_both & ~(condition1 | condition2 | condition3 | condition4), imgIR, imgI)
+    # For similar disparities, interpolate pixel values
+    imgI = np.where(interpolate_mask, 
+                   ((1-alpha) * imgIL + (alpha) * imgIR).astype(np.uint8),
+                   imgI)
     
-    # Handle single valid cases
-    single_valid_L = (disparityIL != -1)[..., np.newaxis] & (disparityIR == -1)[..., np.newaxis]
-    single_valid_R = (disparityIR != -1)[..., np.newaxis] & (disparityIL == -1)[..., np.newaxis]
+    # Handle remaining cases
+    remaining_mask = np.expand_dims(valid_both & ~(non_zero_both & small_diff), axis=2)
+    larger_disparity = np.expand_dims(np.abs(disparityIL) > np.abs(disparityIR), axis=2)
+    black_pixels = np.expand_dims(black_IR & ~black_IL, axis=2)
     
-    imgI = np.where(single_valid_L, imgIL, imgI)
-    imgI = np.where(single_valid_R, imgIR, imgI)
+    imgI = np.where(remaining_mask & larger_disparity, imgIL, imgI)
+    imgI = np.where(remaining_mask & black_pixels, imgIL, imgI)
+    imgI = np.where(remaining_mask & ~larger_disparity & ~black_pixels, imgIR, imgI)
     
+    # Single valid cases
+    imgI = np.where(np.expand_dims(disparityIL != -1, axis=2) & 
+                   np.expand_dims(disparityIR == -1, axis=2), imgIL, imgI)
+    imgI = np.where(np.expand_dims(disparityIR != -1, axis=2) & 
+                   np.expand_dims(disparityIL == -1, axis=2), imgIR, imgI)
+    
+    # === 2. Pixel-wise color consistency check (choose visually closest pixel)
+    small_disp_diff = np.abs(disparityIL - disparityIR) < 20
+    diff = np.linalg.norm(imgIL.astype(np.float32) - imgIR.astype(np.float32), axis=2)
+    good_fit_mask = valid_both & ~small_disp_diff & (diff < 30)  # adjust threshold if needed
+    prefer_left_mask = good_fit_mask & (disparityIL > disparityIR)
+    prefer_right_mask = good_fit_mask & ~prefer_left_mask
+
+    # plt.imshow(diff)
+    # plt.show()
+
+    imgI = np.where(np.expand_dims(prefer_left_mask, 2), imgIL, imgI)
+    imgI = np.where(np.expand_dims(prefer_right_mask, 2), imgIR, imgI)
+    
+    imgI = cv2.inpaint(imgI, invalid_both, 3, cv2.INPAINT_TELEA)
     return imgI
 
 def blur_boundaries(disparity_map):
@@ -670,3 +685,77 @@ def clean_disparity_map(disparity_map, min_blob_size=100):
     disparity_map[valid_mask == 0] = -1
     
     return disparity_map
+
+
+def visualize_boundaries(image, boundary_mask, title="Boundary Visualization"):
+    """
+    Overlay boundary mask on the original image for visualization.
+    
+    Args:
+        image: Original image (grayscale or color)
+        boundary_mask: Binary boundary mask (should be single-channel)
+        title: Title of the visualization
+    """
+    # Convert grayscale image to color if needed
+    if len(image.shape) == 2:
+        image_color = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        image_color = image.copy()
+
+    # Convert mask to 3 channels for color overlay
+    boundary_mask_color = cv2.cvtColor(boundary_mask * 255, cv2.COLOR_GRAY2BGR)
+
+    # Color the boundaries red (modify the R channel)
+    boundary_overlay = image_color.copy()
+    boundary_overlay[:, :, 2] = np.where(boundary_mask == 1, 255, boundary_overlay[:, :, 2])  # Red channel
+
+    # Blend original and boundary overlay
+    blended = cv2.addWeighted(image_color, 0.7, boundary_overlay, 0.3, 0)
+    # blended = cv2.rotate(blended, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    # Show the result
+    plt.figure(figsize=(8, 8))
+    plt.imshow(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for Matplotlib
+    plt.title(title)
+    plt.axis("off")
+    plt.show()
+
+
+
+def visualize_combined_boundaries(image, boundary1, boundary2, title="Combined Boundaries"):
+    """
+    Overlay two boundary masks on the original image in different colors.
+    
+    Args:
+        image: Original image (grayscale or color)
+        boundary1: First boundary mask (should be single-channel)
+        boundary2: Second boundary mask (should be single-channel)
+        title: Title of the visualization
+    """
+    # Convert grayscale image to color if needed
+    if len(image.shape) == 2:
+        image_color = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    else:
+        image_color = image.copy()
+
+    # Create an empty color mask
+    boundary_overlay = np.zeros_like(image_color)
+
+    # Assign colors to boundaries
+    boundary_overlay[:, :, 2] = np.where(boundary1 == 1, 255, 0)  # Red channel for boundary1 (boundaryRL)
+    boundary_overlay[:, :, 0] = np.where(boundary2 == 1, 255, 0)  # Blue channel for boundary2 (boundaryIR)
+
+    # Overlapping areas become purple (red + blue)
+    overlap_mask = (boundary1 == 1) & (boundary2 == 1)
+    boundary_overlay[overlap_mask] = [255, 0, 255]  # Purple (Red + Blue)
+
+    # Blend the overlay with the original image
+    blended = cv2.addWeighted(image_color, 0.7, boundary_overlay, 0.3, 0)
+    # blended = cv2.rotate(blended, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    # Show the result
+    plt.figure(figsize=(8, 8))
+    plt.imshow(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for Matplotlib
+    plt.title(title)
+    plt.axis("off")
+    plt.show()

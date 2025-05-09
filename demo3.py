@@ -6,6 +6,7 @@ from scipy.spatial import Delaunay
 import time
 import os
 import torch # Potrebné pre Transformers
+import faceWarp
 
 # <<< PRIDANE: Importy pre Transformers (Hugging Face)
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
@@ -372,141 +373,141 @@ if __name__ == "__main__":
     #     exit()
 
     # 4. Vzorkovanie a OBOJSMERNÉ párovanie bodov kontúry
-print("--- Obojsmerné párovanie kontúr ---")
+    print("--- Obojsmerné párovanie kontúr ---")
 
-# 4a. Smer A -> B
-print(f"Vzorkujem {NUM_CONTOUR_POINTS} bodov z kontúry A...")
-sampled_contour_A = sample_contour(contour_A, NUM_CONTOUR_POINTS)
-matched_A_from_A, matched_B_from_A = match_stereo_points(
-    sampled_contour_A, contour_B, img_A_gray, img_B_gray,
-    patch_size=PATCH_SIZE, y_tolerance=Y_TOLERANCE, description="A->B"
-)
+    # 4a. Smer A -> B
+    print(f"Vzorkujem {NUM_CONTOUR_POINTS} bodov z kontúry A...")
+    sampled_contour_A = sample_contour(contour_A, NUM_CONTOUR_POINTS)
+    matched_A_from_A, matched_B_from_A = match_stereo_points(
+        sampled_contour_A, contour_B, img_A_gray, img_B_gray,
+        patch_size=PATCH_SIZE, y_tolerance=Y_TOLERANCE, description="A->B"
+    )
 
-# 4b. Smer B -> A
-print(f"Vzorkujem {NUM_CONTOUR_POINTS} bodov z kontúry B...")
-sampled_contour_B = sample_contour(contour_B, NUM_CONTOUR_POINTS)
-# Pozor na poradie argumentov! Referencia je B, cieľ je A.
-# Výstup bude (zhody_na_A_najdene_z_B, body_z_B_ktore_boli_zhodou)
-matched_B_from_B, matched_A_from_B = match_stereo_points(
-    sampled_contour_B, contour_A, img_B_gray, img_A_gray, # Obrázky sú prehodené
-    patch_size=PATCH_SIZE, y_tolerance=Y_TOLERANCE, description="B->A"
-)
+    # 4b. Smer B -> A
+    print(f"Vzorkujem {NUM_CONTOUR_POINTS} bodov z kontúry B...")
+    sampled_contour_B = sample_contour(contour_B, NUM_CONTOUR_POINTS)
+    # Pozor na poradie argumentov! Referencia je B, cieľ je A.
+    # Výstup bude (zhody_na_A_najdene_z_B, body_z_B_ktore_boli_zhodou)
+    matched_B_from_B, matched_A_from_B = match_stereo_points(
+        sampled_contour_B, contour_A, img_B_gray, img_A_gray, # Obrázky sú prehodené
+        patch_size=PATCH_SIZE, y_tolerance=Y_TOLERANCE, description="B->A"
+    )
 
-# 4c. Zlúčenie výsledkov (jednoduchá stratégia)
-print("Zlučujem výsledky párovania...")
-final_matched_A = list(matched_A_from_A) # Začni s výsledkami A->B
-final_matched_B = list(matched_B_from_A)
+    # 4c. Zlúčenie výsledkov (jednoduchá stratégia)
+    print("Zlučujem výsledky párovania...")
+    final_matched_A = list(matched_A_from_A) # Začni s výsledkami A->B
+    final_matched_B = list(matched_B_from_A)
 
-# Použi set pre rýchlu kontrolu už pridaných bodov z B
-# Prevod na tuple, aby boli hashable pre set
-used_B_points = {tuple(p) for p in final_matched_B}
+    # Použi set pre rýchlu kontrolu už pridaných bodov z B
+    # Prevod na tuple, aby boli hashable pre set
+    used_B_points = {tuple(p) for p in final_matched_B}
 
-added_from_B_to_A = 0
-# Prejdi výsledky B->A
-# Pár je (zhoda_na_A, pôvodný_bod_z_B)
-for point_A, point_B in zip(matched_A_from_B, matched_B_from_B):
-    point_B_tuple = tuple(point_B)
-    # Ak tento bod z B ešte nebol pridaný z párovania A->B
-    if point_B_tuple not in used_B_points:
-        final_matched_A.append(point_A)
-        final_matched_B.append(point_B)
-        used_B_points.add(point_B_tuple) # Označ ho ako použitý
-        added_from_B_to_A += 1
+    added_from_B_to_A = 0
+    # Prejdi výsledky B->A
+    # Pár je (zhoda_na_A, pôvodný_bod_z_B)
+    for point_A, point_B in zip(matched_A_from_B, matched_B_from_B):
+        point_B_tuple = tuple(point_B)
+        # Ak tento bod z B ešte nebol pridaný z párovania A->B
+        if point_B_tuple not in used_B_points:
+            final_matched_A.append(point_A)
+            final_matched_B.append(point_B)
+            used_B_points.add(point_B_tuple) # Označ ho ako použitý
+            added_from_B_to_A += 1
 
-print(f"Pridaných {added_from_B_to_A} unikátnych párov z párovania B->A.")
+    print(f"Pridaných {added_from_B_to_A} unikátnych párov z párovania B->A.")
 
-if not final_matched_A: # Skontroluj, či máme vôbec nejaké body
-    print("Chyba: Po zlúčení nezostali žiadne korešpondujúce body na kontúrach.")
-    face_mesh_detector.close()
-    exit()
-else:
-    # 5. Kombinacia bodov
-    face_points_A_np = np.array(face_points_A, dtype=np.float32)
-    face_points_B_np = np.array(face_points_B, dtype=np.float32)
-    # contour_points_A_np = np.array(matched_contour_A, dtype=np.float32)
-    # contour_points_B_np = np.array(matched_contour_B, dtype=np.float32)
-    # all_points_A = np.vstack((face_points_A_np, contour_points_A_np))
-    # all_points_B = np.vstack((face_points_B_np, contour_points_B_np))
-    # <<< ZMENA: Použitie finálnych zlúčených zoznamov
-    contour_points_A_np = np.array(final_matched_A, dtype=np.float32)
-    contour_points_B_np = np.array(final_matched_B, dtype=np.float32)
-    # Skontroluj, či polia nie sú prázdne pred vstack
-    if contour_points_A_np.size == 0:
-        print("Varovanie: Nezostali žiadne body kontúry A po zlúčení.")
-        all_points_A = face_points_A_np
-    else:
-        all_points_A = np.vstack((face_points_A_np, contour_points_A_np))
-
-    if contour_points_B_np.size == 0:
-        print("Varovanie: Nezostali žiadne body kontúry B po zlúčení.")
-        all_points_B = face_points_B_np
-    else:
-        all_points_B = np.vstack((face_points_B_np, contour_points_B_np))
-
-    print(f"Celkový počet korešpondujúcich bodov pre morfovanie: {len(all_points_A)}")
-    # Skontroluj, či mame rovnaky pocet bodov v A a B (mali by sme mat)
-    if len(all_points_A) != len(all_points_B):
-        print("CHYBA: Nesedí počet bodov v A a B po zlúčení! Niekde je problém v logike.")
-        face_mesh_detector.close(); exit()
-
-    # 6. Morfovanie
-    print("Vykonávam morfovanie...")
-    start_morph_time = time.time()
-    mid_points = (all_points_A + all_points_B) * 0.5
-    try:
-        tri = Delaunay(mid_points)
-        print(f"Vytvorených {len(tri.simplices)} trojuholníkov pre morfovanie.")
-    except Exception as e:
-        print(f"Chyba pri Delaunay triangulácii: {e}")
+    if not final_matched_A: # Skontroluj, či máme vôbec nejaké body
+        print("Chyba: Po zlúčení nezostali žiadne korešpondujúce body na kontúrach.")
         face_mesh_detector.close()
         exit()
-    warped_A = apply_morph((h, w, 3), img_A_rgb, all_points_A, mid_points, tri)
-    warped_B = apply_morph((h, w, 3), img_B_rgb, all_points_B, mid_points, tri)
-    morphed_image = cv2.addWeighted(warped_A, 0.5, warped_B, 0.5, 0)
-    end_morph_time = time.time()
-    print(f"Morfovanie dokončené za {end_morph_time - start_morph_time:.2f}s.")
+    else:
+        # 5. Kombinacia bodov
+        face_points_A_np = np.array(face_points_A, dtype=np.float32)
+        face_points_B_np = np.array(face_points_B, dtype=np.float32)
+        # contour_points_A_np = np.array(matched_contour_A, dtype=np.float32)
+        # contour_points_B_np = np.array(matched_contour_B, dtype=np.float32)
+        # all_points_A = np.vstack((face_points_A_np, contour_points_A_np))
+        # all_points_B = np.vstack((face_points_B_np, contour_points_B_np))
+        # <<< ZMENA: Použitie finálnych zlúčených zoznamov
+        contour_points_A_np = np.array(final_matched_A, dtype=np.float32)
+        contour_points_B_np = np.array(final_matched_B, dtype=np.float32)
+        # Skontroluj, či polia nie sú prázdne pred vstack
+        if contour_points_A_np.size == 0:
+            print("Varovanie: Nezostali žiadne body kontúry A po zlúčení.")
+            all_points_A = face_points_A_np
+        else:
+            all_points_A = np.vstack((face_points_A_np, contour_points_A_np))
 
-    plt.imshow(warped_A)
-    plt.show()
-    plt.imshow(warped_B)
-    plt.show()
+        if contour_points_B_np.size == 0:
+            print("Varovanie: Nezostali žiadne body kontúry B po zlúčení.")
+            all_points_B = face_points_B_np
+        else:
+            all_points_B = np.vstack((face_points_B_np, contour_points_B_np))
 
-    # 7. Zobrazenie vysledkov
-    if SHOW_PLOTS:
-        print("Zobrazujem výsledky...")
-        # <<< ZMENA: Zobrazime 3 riadky - originaly, hlbky/masky, vysledky
-        fig, axes = plt.subplots(3, 3, figsize=(18, 15)) # Väčší figsize
+        print(f"Celkový počet korešpondujúcich bodov pre morfovanie: {len(all_points_A)}")
+        # Skontroluj, či mame rovnaky pocet bodov v A a B (mali by sme mat)
+        if len(all_points_A) != len(all_points_B):
+            print("CHYBA: Nesedí počet bodov v A a B po zlúčení! Niekde je problém v logike.")
+            face_mesh_detector.close(); exit()
 
-        # Riadok 1: Originaly + Body
-        axes[0, 0].imshow(img_A_rgb); axes[0, 0].scatter(face_points_A_np[:, 0], face_points_A_np[:, 1], s=5, c='r', label='Tvár A'); axes[0, 0].scatter(contour_points_A_np[:, 0], contour_points_A_np[:, 1], s=5, c='b', label='Kontúra A'); axes[0, 0].set_title('Obrázok A + Body'); axes[0, 0].legend(); axes[0, 0].axis('off')
-        axes[0, 1].imshow(img_B_rgb); axes[0, 1].scatter(face_points_B_np[:, 0], face_points_B_np[:, 1], s=5, c='r', label='Tvár B'); axes[0, 1].scatter(contour_points_B_np[:, 0], contour_points_B_np[:, 1], s=5, c='lime', label='Kontúra B'); axes[0, 1].set_title('Obrázok B + Body'); axes[0, 1].legend(); axes[0, 1].axis('off')
-        axes[0, 2].axis('off') # Prazdne miesto
+        # 6. Morfovanie
+        print("Vykonávam morfovanie...")
+        start_morph_time = time.time()
+        mid_points = (all_points_A + all_points_B) * 0.5
+        try:
+            tri = Delaunay(mid_points)
+            print(f"Vytvorených {len(tri.simplices)} trojuholníkov pre morfovanie.")
+        except Exception as e:
+            print(f"Chyba pri Delaunay triangulácii: {e}")
+            face_mesh_detector.close()
+            exit()
+        warped_A = apply_morph((h, w, 3), img_A_rgb, all_points_A, mid_points, tri)
+        warped_B = apply_morph((h, w, 3), img_B_rgb, all_points_B, mid_points, tri)
+        morphed_image = cv2.addWeighted(warped_A, 0.5, warped_B, 0.5, 0)
+        end_morph_time = time.time()
+        print(f"Morfovanie dokončené za {end_morph_time - start_morph_time:.2f}s.")
 
-        # temp_contours_B, _ = cv2.findContours(mask_B, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        # print(f"DEBUG PLOT: Kreslím {len(temp_contours_B)} nájdených kontúr pre B.")
-        # for i, c in enumerate(temp_contours_B):
-        #     points = c.reshape(-1, 2)
-        #     # Pouzi rozne farby/znacky pre lepsiu identifikaciu
-        #     axes[0, 1].plot(points[:, 0], points[:, 1], '.', markersize=2, label=f'Nájdená Kont. B {i+1}')
-        # if temp_contours_B: # Ak sme nejake nasli, obnov legendu
-        #     axes[0, 1].legend()
-
-        # Riadok 2: Hlbkove mapy a masky
-        axes[1, 0].imshow(depth_map_A_norm, cmap='plasma'); axes[1, 0].set_title('Normalizovaná Hĺbka A'); axes[1, 0].axis('off')
-        axes[1, 1].imshow(depth_map_B_norm, cmap='plasma'); axes[1, 1].set_title('Normalizovaná Hĺbka B'); axes[1, 1].axis('off')
-        # Zobrazime jednu z masiek (napr. A)
-        axes[1, 2].imshow(mask_A, cmap='gray'); axes[1, 2].set_title(f'Maska A (Prah={DEPTH_THRESHOLD_VALUE})'); axes[1, 2].axis('off')
-
-
-        # Riadok 3: Výsledky morfovania
-        axes[2, 0].imshow(warped_A); axes[2, 0].set_title('Warpnutý A na Stred'); axes[2, 0].axis('off')
-        axes[2, 1].imshow(warped_B); axes[2, 1].set_title('Warpnutý B na Stred'); axes[2, 1].axis('off') # <<< PRIDANE: Zobrazenie warp B
-        axes[2, 2].imshow(morphed_image); axes[2, 2].scatter(mid_points[:, 0], mid_points[:, 1], s=3, c='yellow', alpha=0.5); axes[2, 2].set_title('Výsledný Stredový Pohľad'); axes[2, 2].axis('off')
-
-        plt.tight_layout()
+        plt.imshow(warped_A)
+        plt.show()
+        plt.imshow(warped_B)
         plt.show()
 
-    # Uvolnenie zdrojov MediaPipe
-    face_mesh_detector.close()
-    print("MediaPipe Face Mesh zdroje uvoľnené.")
-    print("Skript dokončený.")
+        # 7. Zobrazenie vysledkov
+        if SHOW_PLOTS:
+            print("Zobrazujem výsledky...")
+            # <<< ZMENA: Zobrazime 3 riadky - originaly, hlbky/masky, vysledky
+            fig, axes = plt.subplots(3, 3, figsize=(18, 15)) # Väčší figsize
+
+            # Riadok 1: Originaly + Body
+            axes[0, 0].imshow(img_A_rgb); axes[0, 0].scatter(face_points_A_np[:, 0], face_points_A_np[:, 1], s=5, c='r', label='Tvár A'); axes[0, 0].scatter(contour_points_A_np[:, 0], contour_points_A_np[:, 1], s=5, c='b', label='Kontúra A'); axes[0, 0].set_title('Obrázok A + Body'); axes[0, 0].legend(); axes[0, 0].axis('off')
+            axes[0, 1].imshow(img_B_rgb); axes[0, 1].scatter(face_points_B_np[:, 0], face_points_B_np[:, 1], s=5, c='r', label='Tvár B'); axes[0, 1].scatter(contour_points_B_np[:, 0], contour_points_B_np[:, 1], s=5, c='lime', label='Kontúra B'); axes[0, 1].set_title('Obrázok B + Body'); axes[0, 1].legend(); axes[0, 1].axis('off')
+            axes[0, 2].axis('off') # Prazdne miesto
+
+            # temp_contours_B, _ = cv2.findContours(mask_B, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            # print(f"DEBUG PLOT: Kreslím {len(temp_contours_B)} nájdených kontúr pre B.")
+            # for i, c in enumerate(temp_contours_B):
+            #     points = c.reshape(-1, 2)
+            #     # Pouzi rozne farby/znacky pre lepsiu identifikaciu
+            #     axes[0, 1].plot(points[:, 0], points[:, 1], '.', markersize=2, label=f'Nájdená Kont. B {i+1}')
+            # if temp_contours_B: # Ak sme nejake nasli, obnov legendu
+            #     axes[0, 1].legend()
+
+            # Riadok 2: Hlbkove mapy a masky
+            axes[1, 0].imshow(depth_map_A_norm, cmap='plasma'); axes[1, 0].set_title('Normalizovaná Hĺbka A'); axes[1, 0].axis('off')
+            axes[1, 1].imshow(depth_map_B_norm, cmap='plasma'); axes[1, 1].set_title('Normalizovaná Hĺbka B'); axes[1, 1].axis('off')
+            # Zobrazime jednu z masiek (napr. A)
+            axes[1, 2].imshow(mask_A, cmap='gray'); axes[1, 2].set_title(f'Maska A (Prah={DEPTH_THRESHOLD_VALUE})'); axes[1, 2].axis('off')
+
+
+            # Riadok 3: Výsledky morfovania
+            axes[2, 0].imshow(warped_A); axes[2, 0].set_title('Warpnutý A na Stred'); axes[2, 0].axis('off')
+            axes[2, 1].imshow(warped_B); axes[2, 1].set_title('Warpnutý B na Stred'); axes[2, 1].axis('off') # <<< PRIDANE: Zobrazenie warp B
+            axes[2, 2].imshow(morphed_image); axes[2, 2].scatter(mid_points[:, 0], mid_points[:, 1], s=3, c='yellow', alpha=0.5); axes[2, 2].set_title('Výsledný Stredový Pohľad'); axes[2, 2].axis('off')
+
+            plt.tight_layout()
+            plt.show()
+
+        # Uvolnenie zdrojov MediaPipe
+        face_mesh_detector.close()
+        print("MediaPipe Face Mesh zdroje uvoľnené.")
+        print("Skript dokončený.")

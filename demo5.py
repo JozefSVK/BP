@@ -455,12 +455,16 @@ if __name__ == "__main__":
         # 6. Morfovanie
         print("Vykonávam morfovanie...")
         start_morph_time = time.time()
+        mid_face_points = (face_points_A_np + face_points_B_np) * 0.5
         mid_points = (all_points_A + all_points_B) * 0.5
         try:
             # Delaunay triangulácia na stredových bodoch
             delaunay_obj = Delaunay(mid_points)
             triangles_indices = delaunay_obj.simplices # Získame pole indexov trojuholníkov
             print(f"Vytvorených {len(triangles_indices)} trojuholníkov pre morfovanie.")
+
+            delaunay_face_obj = Delaunay(mid_face_points)
+            triangles_face_indices = delaunay_face_obj.simplices # Získame pole indexov trojuholníkov
         except Exception as e:
             print(f"Chyba pri Delaunay triangulácii: {e}")
             if 'face_mesh_detector' in locals() and face_mesh_detector: face_mesh_detector.close()
@@ -474,16 +478,50 @@ if __name__ == "__main__":
             img_A_rgb, all_points_A, mid_points, triangles_indices, dst_shape
         )
 
+        warped_faceA_advanced, warped_mask_faceA = faceWarp.warp_image_piecewise_affine(
+            img_A_rgb, face_points_A_np, mid_face_points, triangles_face_indices, dst_shape
+        )
+
         print("Warpujem obrázok B na stred...")
         # Použijeme all_points_B ako zdroj, mid_points ako cieľ, triangles_indices ako definíciu trojuholníkov
         warped_B_advanced, warped_mask_B = faceWarp.warp_image_piecewise_affine(
             img_B_rgb, all_points_B, mid_points, triangles_indices, dst_shape
         )
 
+        warped_faceB_advanced, warped_mask_faceB = faceWarp.warp_image_piecewise_affine(
+            img_B_rgb, face_points_B_np, mid_face_points, triangles_face_indices, dst_shape
+        )
+
         print("Blendujem warpnuté obrázky...")
         morphed_image, blended_mask = faceWarp.blend_images_masked_alpha(
             warped_A_advanced, warped_mask_A, warped_B_advanced, warped_mask_B
         )
+
+        morphed_face_image, blended_mask_face = faceWarp.blend_images_masked_alpha(
+            warped_faceA_advanced, warped_mask_A, warped_faceB_advanced, warped_mask_B
+        )
+
+        # plt.imshow(morphed_face_image)
+        # plt.show()
+        if len(morphed_face_image.shape) == 3:
+            final_face_mask_gray = cv2.cvtColor(morphed_face_image, cv2.COLOR_BGR2GRAY)
+        else:
+            final_face_mask_gray = morphed_face_image
+        _, final_face_mask_bin = cv2.threshold(final_face_mask_gray, 1, 255, cv2.THRESH_BINARY)
+
+        # Vytvor inverznú masku pre pozadie/zvyšok hlavy
+        inverse_face_mask_bin = cv2.bitwise_not(final_face_mask_bin)
+
+        # Vezmi pozadie z blended_full_head
+        background_part = cv2.bitwise_and(morphed_image, morphed_image, mask=inverse_face_mask_bin)
+
+        # Vezmi popredie (tvár) z blended_face
+        foreground_part = cv2.bitwise_and(morphed_face_image, morphed_face_image, mask=final_face_mask_bin)
+
+        # Skombinuj
+        final_result_image = cv2.add(background_part, foreground_part)
+        # plt.imshow(final_result_image)
+        # plt.show()
 
         # Voliteľný post-processing
         # print("Aplikujem post-processing...")
@@ -545,7 +583,7 @@ if __name__ == "__main__":
 
             axes[2, 0].imshow(warped_A_advanced); axes[2, 0].set_title('Warpnutý A na Stred'); axes[2, 0].axis('off'); axes[2,0].scatter(points_A_middle[:,0], points_A_middle[:,1], s=3, c='yellow', alpha=0.5)
             axes[2, 1].imshow(warped_B_advanced); axes[2, 1].set_title('Warpnutý B na Stred'); axes[2, 1].axis('off'); axes[2,1].scatter(points_B_middle[:,0], points_B_middle[:,1], s=3, c='yellow', alpha=0.5)
-            axes[2, 2].imshow(morphed_image); axes[2, 2].scatter(mid_points[:, 0], mid_points[:, 1], s=3, c='yellow', alpha=0.5); axes[2, 2].set_title('Výsledný Stredový Pohľad'); axes[2, 2].axis('off')
+            axes[2, 2].imshow(final_result_image); axes[2, 2].scatter(mid_points[:, 0], mid_points[:, 1], s=3, c='yellow', alpha=0.5); axes[2, 2].set_title('Výsledný Stredový Pohľad'); axes[2, 2].axis('off')
 
             plt.tight_layout()
             plt.show()

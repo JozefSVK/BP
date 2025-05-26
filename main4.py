@@ -10,8 +10,6 @@ def func4(top_left_image_path, top_right_image_path, bottom_left_image_path, bot
     BL_image = cv2.imread(bottom_left_image_path)
     BR_image = cv2.imread(bottom_right_image_path)
 
-
-
     # downscale
     resized_images = [cv2.resize(image, None, fx=downscale, fy=downscale) for image in [TL_image, TR_image, BL_image, BR_image]]
     TL_image, TR_image, BL_image, BR_image = resized_images
@@ -30,23 +28,23 @@ def func4(top_left_image_path, top_right_image_path, bottom_left_image_path, bot
     beta = 1 - beta
 
     # Define the codec and create VideoWriter object
-    # fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
-    # appendFilename = "4cameras"
-    # filename = f"img_{model}_{appendFilename}.mp4"
-    # height, width = TL_image.shape[:2]
-    # video_writer = cv2.VideoWriter(filename, fourcc, 10, (width, height))
-    # inter_values = np.linspace(0, 1, 11)
-    # for valueAlpha in inter_values:
-    #     for valueBeta in inter_values:
-    #         valueAlpha = round(valueAlpha, 2)
-    #         valueBeta = round(valueBeta, 2)
-    #         print("value alpha " + str(valueAlpha) + " value beta " + str(valueBeta))
-    #         imgI = create_intermediate_view([TL_image, TL_disparityH, TL_disparityV], [TR_image, TR_disparityH, TR_disparityV], 
-    #                                          [BL_image, BL_disparityH, BL_disparityV], [BR_image, BR_disparityH, BR_disparityV],
-    #                                          valueAlpha, valueBeta, model)
-    #         imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
-    #         video_writer.write(imgI)
-    # video_writer.release()
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+    appendFilename = "4cameras"
+    filename = f"img_{model}_{appendFilename}.mp4"
+    height, width = TL_image.shape[:2]
+    video_writer = cv2.VideoWriter(filename, fourcc, 10, (width, height))
+    inter_values = np.linspace(0, 1, 11)
+    for valueAlpha in inter_values:
+        for valueBeta in inter_values:
+            valueAlpha = round(valueAlpha, 2)
+            valueBeta = round(valueBeta, 2)
+            print("value alpha " + str(valueAlpha) + " value beta " + str(valueBeta))
+            imgI = create_intermediate_view([TL_image, TL_disparityH, TL_disparityV], [TR_image, TR_disparityH, TR_disparityV], 
+                                             [BL_image, BL_disparityH, BL_disparityV], [BR_image, BR_disparityH, BR_disparityV],
+                                             valueAlpha, valueBeta, model)
+            imgI = cv2.cvtColor(imgI, cv2.COLOR_BGR2RGB)
+            video_writer.write(imgI)
+    video_writer.release()
 
     imgI = create_intermediate_view([TL_image, TL_disparityH, TL_disparityV], [TR_image, TR_disparityH, TR_disparityV], 
                                              [BL_image, BL_disparityH, BL_disparityV], [BR_image, BR_disparityH, BR_disparityV],
@@ -101,64 +99,48 @@ def create_intermediate_view(top_left_list, top_right_list, bottom_left_list, bo
         not_in_cache_alpha = True
     
 
-    # vertical view synthesis\
+    # vertical view synthesis
     if((round(0.0, 2), round(beta, 2)) in intermediate_cache):
         left_image = intermediate_cache[(round(0.0, 2), round(beta, 2))]
     else:
         left_image = synthesis_view(bottom_left_list, top_left_list, beta, True)
         not_in_cache_beta = True
 
-    # left_image = synthesis_view(bottom_left_list, top_left_list, beta, True)
     if((round(1.0, 2), round(beta, 2)) in intermediate_cache):
         right_image = intermediate_cache[(round(1.0, 2), round(beta, 2))]
     else:
         right_image = synthesis_view(bottom_right_list, top_right_list, beta, True)
         not_in_cache_beta = True
-    # right_image = synthesis_view(bottom_right_list, top_right_list, beta, True)
 
-    # plt.subplot(2, 2, 1)  # (rows, columns, index) 
-    # plt.imshow(top_image)
-    # plt.title('top image')
-    # plt.axis('off')
-
-    # plt.subplot(2, 2, 2)  # (rows, columns, index) 
-    # plt.imshow(bottom_image)
-    # plt.title('bottom image')
-    # plt.axis('off')
-
-    # plt.subplot(2, 2, 3)  # (rows, columns, index) 
-    # plt.imshow(left_image)
-    # plt.title('left image')
-    # plt.axis('off')
-
-    # plt.subplot(2, 2, 4)  # (rows, columns, index) 
-    # plt.imshow(right_image)
-    # plt.title('right image')
-    # plt.axis('off')
-
-    # plt.show()
-
+    # Získaj disparity dáta z cache alebo vytvor nové
     if not_in_cache_alpha:
         disparityBT, disparityTB = utilities.getVerticalDisparity(bottom_image, top_image, model)
     else:
+        # Ak sú dáta z cache, sú v formáte [image, horizontal_disparity, vertical_disparity]
         disparityBT = bottom_image[2]
         disparityTB = top_image[2]
-
         bottom_image = bottom_image[0]
         top_image = top_image[0]
 
     if not_in_cache_beta:
-        disparityLR, disparityRL = utilities.calculate_disparity(left_image, right_image, model)
+        # OPRAVA: Extrahuj skutočné obrázky zo zoznamov pred volaním calculate_disparity
+        left_img = left_image[0] if isinstance(left_image, list) else left_image
+        right_img = right_image[0] if isinstance(right_image, list) else right_image
+        disparityLR, disparityRL = utilities.calculate_disparity(left_img, right_img, model)
+        # Aktualizuj left_image a right_image na skutočné obrázky
+        left_image = left_img
+        right_image = right_img
     else:
+        # Ak sú dáta z cache, sú v formáte [image, horizontal_disparity, vertical_disparity]
         disparityLR = left_image[1]
         disparityRL = right_image[1]
-
         left_image = left_image[0]
         right_image = right_image[0]
 
     imgIV = synthesis_view([bottom_image, None, disparityBT], [top_image, None, disparityTB], beta, True)
     imgIH = synthesis_view([left_image, disparityLR, None], [right_image, disparityRL, None], alpha)
 
+    # Pridaj do cache len ak sme nepočítali obrázky z cache a nie sú to krajné hodnoty
     if (not_in_cache_alpha or not_in_cache_beta) and not ((alpha == 0.0 or alpha == 1.0) and (beta == 0.0 or beta == 1.0)):
         print("Added image ", alpha, beta)
         intermediate_cache[(round(alpha, 2), round(0.0, 2))] = [top_image, None, disparityTB]
@@ -171,29 +153,7 @@ def create_intermediate_view(top_left_list, top_right_list, bottom_left_list, bo
 
     final_image = cv2.addWeighted(imgIV, 0.5, imgIH, 0.5, 0.0)
 
-    # plt.subplot(3, 1, 1)  # (rows, columns, index) 
-    # plt.imshow(imgIV)
-    # plt.title('Vertical middle')
-    # plt.axis('off')
-
-    # plt.subplot(3, 1, 2)  # (rows, columns, index) 
-    # plt.imshow(imgIH)
-    # plt.title('Horizontal middle')
-    # plt.axis('off')
-
-    # plt.subplot(3, 1, 3)  # (rows, columns, index) 
-    # plt.imshow(final_image)
-    # plt.title('bleded middle')
-    # plt.axis('off')
-
-    # plt.show()
-
-    # final_image = cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB)
-    # cv2.imwrite("dataset/custom_res/Middle_view.png", final_image)
-
     return final_image
-
-
 
 
 if __name__ == "__main__":

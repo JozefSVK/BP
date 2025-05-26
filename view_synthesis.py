@@ -5,6 +5,8 @@ from matplotlib import pyplot as plt
 import cupy as cp
 from cupyx import scatter_add
 import math
+import demoChat4
+import demoChat5
 
 
 def get_foreground_disparity(disparity):
@@ -269,7 +271,7 @@ def generate_intermediate_disparity(disparityLR, alpha, multiplier):
     
     return disparityIL
 
-def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
+def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, top_down_imgs = False):
     imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
     imgR_rgb = cv2.cvtColor(imgR, cv2.COLOR_BGR2RGB)
     if(alpha == 0):
@@ -286,6 +288,113 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
 
     disparityIL = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
     disparityIR = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
+
+    # --------------------
+    # Detect face in image
+    # if there is one we will use custom generator for head and replace the version that DIBR generate
+    # --------------------
+    face_imgL = imgL
+    face_imgR = imgR
+    if(top_down_imgs):
+        face_imgL = cv2.rotate(face_imgL, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        face_imgR = cv2.rotate(face_imgR, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    faceL = demoChat4.get_face_landmarks(face_imgL)
+    faceR = demoChat4.get_face_landmarks(face_imgR)
+    
+    if faceL is not None and faceR is not None:
+        def get_head(face_img, face_points):
+            person_mask = demoChat5.segment_head(face_img)
+
+            contour_mask = (person_mask > 0.5).astype(np.uint8) * 255
+            person_img = cv2.bitwise_and(face_img, face_img, mask=contour_mask)
+
+            chin_y = face_points[152][1]
+
+            # 2) build a mask that is “1” only above the chin
+            h, w = face_img.shape[:2]
+            head_mask = np.zeros((h, w), dtype=np.uint8)
+            head_mask[:chin_y+5, :] = 1  # +10px for safety
+
+
+            # 3) optional: smooth the top edge so it isn’t jaggy
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15))
+            head_mask = cv2.morphologyEx(head_mask, cv2.MORPH_CLOSE, kernel)
+
+            res = cv2.bitwise_and(person_img, person_img, mask=head_mask)
+
+            head_mask = cv2.bitwise_and(contour_mask, head_mask)
+            
+            return res, head_mask, contour_mask
+        
+        # get only the head region from image       
+        headL, maskL, contourL = get_head(face_imgL, faceL)
+        headR, maskR, contourR = get_head(face_imgR, faceR)
+
+        def head_contours(mask, n_points=200):
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            if not cnts:
+                return None
+            cnt = max(cnts, key=lambda c: cv2.contourArea(c))[:,0,:]
+            idx = np.round(np.linspace(0, len(cnt)-1, n_points)).astype(int)
+
+            return cnt[idx]
+
+        # map the edges of the head
+        cL = head_contours(maskL)
+        cR = head_contours(maskR)
+
+        # combine the face and head keypoints for each image
+        ptsL = np.vstack([faceL, cL])
+        ptsR = np.vstack([faceR, cR])
+        pts_mid = ((1-alpha)*ptsL + alpha*ptsR).astype(np.int32)
+
+        mask_mid = np.zeros(headL.shape[:2], dtype=np.uint8)
+        cv2.fillPoly(mask_mid, [pts_mid], 255)
+
+        warp1, warp2 = demoChat4.warp_images(headL, headR, ptsL, ptsR, pts_mid)
+
+        if not top_down_imgs:
+            mid_coord = int(np.median(pts_mid[:,0]))  # legacy left/right
+        else:
+            mid_coord = int(np.median(pts_mid[:,1]))  # new up/down
+        Wmask = demoChat4.compute_weight_mask(headL.shape, mid_coord, 40, "y" if top_down_imgs else "x")
+        blended = cv2.convertScaleAbs(warp1*(1-Wmask) + warp2*Wmask) 
+        blended_mask = np.any(blended > 0, axis=2)  
+        
+        # get the edges of head that aren't in the mask and remove them from disparity
+        # Create structuring element B1
+        B1 = np.ones((10, 10), np.uint8)
+        # Perform morphological dilation
+        dilatedL = cv2.dilate(maskL, B1)
+        outlineL = dilatedL - maskL
+        diffL = cv2.bitwise_and(outlineL, cv2.bitwise_not(contourL))
+        diffL = diffL + maskL
+        
+        dilatedR = cv2.dilate(maskR, B1)
+        outlineR = dilatedR - maskR
+        diffR = cv2.bitwise_and(outlineR, cv2.bitwise_not(contourR))
+        diffR = diffR + maskR
+
+        # disparityLR[diffL > 0] = -1
+        # disparityRL[diffR > 0] = -1
+
+        blended = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)   
+
+        # plt.imshow(blended)
+        # plt.show()
+        # plt.imshow(warp2)
+        # plt.show()
+        # plt.imshow(warp1)
+        # plt.show()
+        # plt.imshow(headL)
+        # plt.show()
+        
+
+    # -------------------
+    # end of mediapipe rein
+    # -------------------
+
 
     # disparityIL = warp_disparity_gpu(disparityLR, alpha, height, width)
     start = time.time()
@@ -327,19 +436,19 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     
     # combined_boundary = cv2.bitwise_or(boundaryLR, combined_boundary)
 
-    plt.subplot(1, 2, 1)  # (rows, columns, index) 
-    plt.imshow(disparityLR)
-    plt.title('Left Image')
-    plt.axis('off')
+    # plt.subplot(1, 2, 1)  # (rows, columns, index) 
+    # plt.imshow(disparityLR)
+    # plt.title('Left Image')
+    # plt.axis('off')
 
-    # Display imgR
-    plt.subplot(1, 2, 2)
-    plt.imshow(disparityIL_helper)
-    plt.title('Right Image')
-    plt.axis('off')
-    plt.show()
+    # # Display imgR
+    # plt.subplot(1, 2, 2)
+    # plt.imshow(disparityIL_helper)
+    # plt.title('Right Image')
+    # plt.axis('off')
+    # plt.show()
 
-    visualize_boundaries(imgL_rgb, boundaryLR, "Boundary LR")
+    # visualize_boundaries(imgL_rgb, boundaryLR, "Boundary LR")
     # visualize_boundaries(imgL_rgb, boundaryIL, "Boundary IL")
     # visualize_boundaries(imgL_rgb, combined_boundary, "Combined boundary")
     # visualize_combined_boundaries(imgL_rgb, boundaryLR, boundaryIL)
@@ -355,7 +464,7 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     imgIL = warp_image_cv2(imgL_rgb, disparityIL, 1, alpha)
     # disparityIL[combined_boundary == 1] = -1
     # visualize_boundaries(imgIL, boundaryIL, "Boundary IL")
-    visualize_boundaries(imgIL, combined_boundary, "Combined Boundaries")
+    # visualize_boundaries(imgIL, combined_boundary, "Combined Boundaries")
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIL[y, x] >= 0):
@@ -487,6 +596,60 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     #             imgI[y, x] = imgIR[y, x]
 
     print("Merging " + str(time.time() - start))
+    if faceL is not None and faceR is not None:
+
+        # imgI[blended_mask > 0] = (0.5 * blended[blended_mask > 0] + 0.5 * imgI[blended_mask > 0]).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))  # Adjust size as needed
+        inner_face_mask = cv2.erode(blended_mask.astype(np.uint8), kernel, iterations=1)
+        edges_mask = blended_mask.astype(np.uint8) - inner_face_mask
+        # visualize_boundaries(blended, edges_mask)
+
+        blended_mask_uint8 = blended_mask.astype(np.uint8) * 255
+        disparity_exists_mask = (disparityIL_helper[:, :, 0] != -1).astype(np.uint8) * 255
+        if top_down_imgs:
+            blended_mask = blended_mask.astype(np.uint8) * 255
+            blended_mask = cv2.rotate(blended_mask, cv2.ROTATE_90_CLOCKWISE)
+            blended = cv2.rotate(blended, cv2.ROTATE_90_CLOCKWISE)
+            leftover = ((blended_mask > 0) & (disparityIL_helper[:, :, 0] == -1)).astype(np.uint8) * 255
+            leftover = (leftover & (disparityIR_helper[:, :, 0] == -1)).astype(np.uint8) * 255
+            plt.imshow(leftover)
+            plt.show()
+        else:
+            leftover = (blended_mask & (disparityIL_helper[:, :, 0] == -1)).astype(np.uint8) * 255
+            plt.imshow(leftover)
+            plt.show()
+            leftover = (leftover & (disparityIR_helper[:, :, 0] == -1)).astype(np.uint8) * 255
+            plt.imshow(leftover)
+            plt.show()
+
+        # plt.imshow(blended)
+        # plt.show()
+
+        # leftover: tvoje pôvodné 255/0 binárne maska v uint8
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(leftover, connectivity=8)
+
+        clean_leftover = np.zeros_like(leftover)
+        min_blob_size = 10   # doladiť podľa rozlíšenia, napr. 200–1000 px
+
+        for label in range(1, num_labels):
+            area = stats[label, cv2.CC_STAT_AREA]
+            if area >= min_blob_size:
+                clean_leftover[labels == label] = 255
+        leftover = clean_leftover
+
+        plt.imshow(leftover)
+        plt.show()
+
+        # kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15))
+        # leftover = cv2.morphologyEx(leftover, cv2.MORPH_CLOSE, kernel_close)
+
+        # kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
+        # leftover = cv2.morphologyEx(leftover, cv2.MORPH_OPEN, kernel_open)
+
+        # plt.imshow(leftover)
+        # plt.show()
+
+        imgI[leftover > 0] = blended[leftover > 0]
     return imgI, disparityIL, disparityIR, imgIL, imgIR
 
 

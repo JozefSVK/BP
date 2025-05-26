@@ -109,10 +109,10 @@ def morph_head(img1, img2, alpha=0.5):
 # --------------------------
 # 6) Run & show result
 # --------------------------
-# imgL = cv2.imread("dataset/1/1/0003.png")
-imgL = cv2.imread("dataset/dataset/BL.jpeg")
-# imgR = cv2.imread("dataset/1/1/0002.png")
-imgR = cv2.imread("dataset/dataset/BR.jpeg")
+imgL = cv2.imread("dataset/1/1/0003.png")
+# imgL = cv2.imread("dataset/dataset/BL.jpeg")
+imgR = cv2.imread("dataset/1/1/0002.png")
+# imgR = cv2.imread("dataset/dataset/BR.jpeg")
 res  = morph_head(imgL, imgR, alpha=0.5)
 plt.figure(figsize=(6,6))
 plt.imshow(cv2.cvtColor(res, cv2.COLOR_BGR2RGB))

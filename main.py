@@ -11,6 +11,8 @@ from cupyx import scatter_add
 import view_synthesis
 import face_morph
 import utilities
+import argparse
+import sys
 
 count = 1
 
@@ -180,7 +182,7 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
     imgI = np.zeros((imgL.shape[0], imgL.shape[1], 3), np.uint8)
 
 
-    alpha = 0.5
+    alpha = 0.25
     # start = time.time()
     # print("Starting")
 
@@ -314,7 +316,7 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
     # video_writer.release()
 
 
-    imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha)
+    imgI, disparityIL, disparityIR, imgIL, imgIR  = view_synthesis.create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha, top_down_imgs)
     # print("Calculation of middle " + str(time.time() - start))
     print("Whole time " + str(time.time() - start))
     # #imgI = cv.fastNlMeansDenoisingColored(imgI,None,10,10,7,12)
@@ -403,7 +405,7 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
     # imgIL = cv2.cvtColor(imgIL, cv2.COLOR_BGR2RGB)
     # imgIR = cv2.cvtColor(imgIR, cv2.COLOR_BGR2RGB)
     # global count
-    # filename = f"img{count}.png"
+    # filename = f"new_res_head/H5_5.png"
     # cv2.imwrite(filename, imgI)
     # count += 1
     # cv2.imwrite("R5.png", imgI)
@@ -419,34 +421,55 @@ def save_disparity(disparity_map, text):
     cv2.imwrite(text, disparity_uint8)
 
 if __name__ == "__main__":
-    # func('dataset/1/1/0003.png', 'dataset/1/1/0002.png')
-    model_name = 'IGEV'
-    top_down = True
-    # func('dataset/1/2/right.png', 'dataset/1/2/left.png', 1/3, model_name)
-    # func('dataset/real/topL.png', 'dataset/real/topR.png', 1, model_name)
-    # func('dataset/real/botL.png', 'dataset/real/topL.png', 1, model_name, top_down)
-    
-    # func('view1.png', 'view5.png', 1, model_name)
-    # func('im0.png', 'im1.png', 1/2, model_name)
-    # func('dataset/1/2/0004.png', 'dataset/1/2/0005.png', 1/3, model_name, top_down)
-    # func('dataset/3/2/0003.png', 'dataset/3/2/0002.png', 1/3, model_name)
-    # func('dataset/4/2/0003.png', 'dataset/4/2/0002.png', 1/3, model_name)
-    # func('dataset/5/2/0003.png', 'dataset/5/2/0002.png', 1/3, model_name)
-    # func('dataset/6/2/0003.png', 'dataset/6/2/0002.png', 1/3, model_name)
-    # func('dataset/7/right.png', 'dataset/7/left.png', 1/3, model_name)
-    # func('dataset/8/right.png', 'dataset/8/left.png', 1/3, model_name)
-    # func('dataset/9/left.png', 'dataset/9/right.png', 1/3, model_name)
-    # func('dataset/2/0003.png', 'dataset/2/0002.png', 1/3, model_name)
-    # func('dataset/11/0003.png', 'dataset/11/0002.png', 1/3, model_name)
-    # compare_disparities('img/2/image.npy', 'img/2/image.png')
+    if(len(sys.argv) > 1):
 
-    # custom dataset
-    # func('dataset/custom_dataset/bg/BL.jpeg', 'dataset/custom_dataset/bg/TL.jpeg', 1/3, model_name, top_down)
-    # func('dataset/custom_dataset/bg/BR.jpeg', 'dataset/custom_dataset/bg/TR.jpeg', 1/3, model_name, top_down)
-    # func('dataset/custom_res/R25.png', 'dataset/custom_res/L25.png', 1, model_name)
-    # func('dataset/dataset/res/L5.png', 'dataset/dataset/res/R5.png', 1, model_name)
-    # func('dataset/custom_res/R75.png', 'dataset/custom_res/L75.png', 1, model_name)
-    # func('dataset/custom/botL.jpeg', 'dataset/custom/botR.jpeg', 1/3, model_name)
-    func('dataset/custom_dataset/bg/BL.jpeg', 'dataset/custom_dataset/bg/BR.jpeg', 1/3, model_name)
-    # func('dataset/custom_dataset/bg/TL.jpeg', 'dataset/custom_dataset/bg/TR.jpeg', 1/3, model_name)
+        parser = argparse.ArgumentParser(description="Stereo image processing and view synthesis")
+        parser.add_argument('--left', type=str, required=True, help='Path to left image')
+        parser.add_argument('--right', type=str, required=True, help='Path to right image')
+        parser.add_argument('--resize', type=float, default=1.0, help='Resize factor (e.g., 0.5)')
+        parser.add_argument('--model', type=str, default='IGEV', help='Disparity model name')
+        parser.add_argument('--topdown', action='store_true', help='Use if images are in top-down view')
 
+        args = parser.parse_args()
+
+        func(
+            left_image_path=args.left,
+            right_image_path=args.right,
+            donwscale=args.resize,
+            model=args.model,
+            top_down_imgs=args.topdown
+        )
+
+    else:
+        # func('dataset/1/1/0003.png', 'dataset/1/1/0002.png')
+        model_name = 'IGEV'
+        top_down = True
+        # func('dataset/1/2/right.png', 'dataset/1/2/left.png', 1/3, model_name)
+        # func('dataset/real/topL.png', 'dataset/real/topR.png', 1, model_name)
+        # func('dataset/real/botL.png', 'dataset/real/topL.png', 1, model_name, top_down)
+        
+        # func('view1.png', 'view5.png', 1, model_name)
+        # func('im0.png', 'im1.png', 1/2, model_name)
+        # func('dataset/1/2/0004.png', 'dataset/1/2/0005.png', 1/3, model_name, top_down)
+        # func('dataset/3/2/0003.png', 'dataset/3/2/0002.png', 1/3, model_name)
+        # func('dataset/4/2/0003.png', 'dataset/4/2/0002.png', 1/3, model_name)
+        # func('dataset/5/2/0003.png', 'dataset/5/2/0002.png', 1/3, model_name)
+        # func('dataset/6/2/0003.png', 'dataset/6/2/0002.png', 1/3, model_name)
+        # func('dataset/7/right.png', 'dataset/7/left.png', 1/3, model_name)
+        # func('dataset/8/right.png', 'dataset/8/left.png', 1/3, model_name)
+        # func('dataset/9/left.png', 'dataset/9/right.png', 1/3, model_name)
+        # func('dataset/2/0003.png', 'dataset/2/0002.png', 1/3, model_name)
+        # func('dataset/11/0003.png', 'dataset/11/0002.png', 1/3, model_name)
+        # compare_disparities('img/2/image.npy', 'img/2/image.png')
+
+        # custom dataset
+        # func('dataset/custom_dataset/bg/BL.jpeg', 'dataset/custom_dataset/bg/TL.jpeg', 1/3, model_name, top_down)
+        # func('dataset/custom_dataset/bg/BR.jpeg', 'dataset/custom_dataset/bg/TR.jpeg', 1/3, model_name, top_down)
+        # func('dataset/custom_res/R25.png', 'dataset/custom_res/L25.png', 1, model_name)
+        # func('dataset/dataset/res/L5.png', 'dataset/dataset/res/R5.png', 1, model_name)
+        # func('dataset/custom_res/R75.png', 'dataset/custom_res/L75.png', 1, model_name)
+        # func('dataset/custom/botL.jpeg', 'dataset/custom/botR.jpeg', 1/3, model_name)
+        func('dataset/custom_dataset/bg/BL.jpeg', 'dataset/custom_dataset/bg/BR.jpeg', 1/3, model_name)
+        # func('dataset/custom_dataset/bg/TL.jpeg', 'dataset/custom_dataset/bg/TR.jpeg', 1/3, model_name)
+        # func('new_res_head/L5.png', 'new_res_head/R5.png', 1, model_name)
+        # func('new_res_head/B5.png', 'new_res_head/T5.png', 1, model_name, top_down)

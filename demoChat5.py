@@ -3,8 +3,11 @@ import numpy as np
 import mediapipe as mp
 import matplotlib.pyplot as plt
 from transformers import pipeline
+from torchvision import transforms
+from transformers import AutoModelForImageSegmentation
 from PIL import Image
 import torch
+from skimage.metrics import mean_squared_error, peak_signal_noise_ratio, structural_similarity
 
 
 # ------------------------------------------------------------------
@@ -48,7 +51,7 @@ def extract_head_only(fg_image):
 
     # 2) build a mask that is “1” only above the chin
     head_mask = np.zeros((h, w), dtype=np.uint8)
-    head_mask[:chin_y+10, :] = 1  # +10px for safety
+    head_mask[:chin_y+5, :] = 1  # +10px for safety
 
 
     # 3) optional: smooth the top edge so it isn’t jaggy
@@ -97,6 +100,130 @@ def get_fg(img_path):
 
     return mask_np
 
+# Load the BiRefNet portrait model
+model_id = 'ZhengPeng7/BiRefNet-portrait'  # Portrait-specific model
+birefnet = AutoModelForImageSegmentation.from_pretrained(model_id, trust_remote_code=True)
+# Use GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+birefnet.to(device)
+birefnet.eval()
+
+def segment_head(image, output_path=None):
+    """
+    Segment head from image using BiRefNet
+    
+    Args:
+        image_path: Path to input image
+        output_path: Path to save output image with alpha channel
+        
+    Returns:
+        PIL Image with alpha channel (transparent background)
+    """
+    # Data settings
+    image_size = (1024, 1024)
+    transform_image = transforms.Compose([
+        transforms.Resize(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    
+    # Load and preprocess image
+    if isinstance(image, np.ndarray):
+        # Check if image is BGR (OpenCV format) and convert to RGB if needed
+        if image.shape[2] == 3:  # If it has 3 channels
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(image)
+    else:
+        image = image
+
+    input_tensor = transform_image(image).unsqueeze(0).to(device)
+    
+    # Convert to half precision if using
+    if next(birefnet.parameters()).dtype == torch.float16:
+        input_tensor = input_tensor.half()
+    
+    # Run prediction
+    with torch.no_grad():
+        preds = birefnet(input_tensor)[-1].sigmoid().cpu()
+    
+    # Process mask
+    pred = preds[0].squeeze()
+    pred_pil = transforms.ToPILImage()(pred)
+    mask = pred_pil.resize(image.size)
+    
+    # Apply mask to image
+    result = image.copy()
+    result.putalpha(mask)
+    
+    # Save result if output path provided
+    # if output_path:
+    #     result.save(output_path)
+
+    # Convert PIL Image mask to NumPy array
+    mask_np = np.array(mask)
+
+    # Ensure mask is normalized between 0 and 1
+    if mask_np.max() > 1:
+        mask_np = mask_np / 255.0
+    
+    return mask_np
+
+def compare_generated_to_gt(gen_img, gt_img):
+    """
+    Compare two images (generated vs ground truth) only in the non-black region of gen_img.
+    
+    Parameters:
+    - gen_img: Generated image (H x W x C), uint8
+    - gt_img: Ground truth image (H x W x C), same size and type as gen_img
+    
+    Returns:
+    - metrics: dict with MSE, PSNR, SSIM over the valid region
+    """
+    # Ensure they have the same shape
+    assert gen_img.shape == gt_img.shape, "Generated and GT must match dimensions"
+
+    mask_gen_head = segment_head(gt_img)
+    mask_gen_head = (mask_gen_head > 0.5).astype(np.uint8) * 255
+    gt_img = cv2.bitwise_and(gt_img, gt_img, mask=mask_gen_head)
+    plt.imshow(mask_gen_head)
+    plt.show()
+    plt.imshow(gt_img)
+    plt.show()
+    
+    # Create mask where generated is not black (any channel non-zero)
+    mask = np.any(gen_img != 0, axis=2)
+    
+    # If no valid pixels, error
+    if not mask.any():
+        raise ValueError("No non-black pixels found in generated image.")
+    
+    # Crop to bounding box of mask
+    ys, xs = np.where(mask)
+    y1, y2 = ys.min(), ys.max()
+    x1, x2 = xs.min(), xs.max()
+    gen_crop = gen_img[y1:y2+1, x1:x2+1]
+    gt_crop  = gt_img[y1:y2+1, x1:x2+1]
+    mask_crop = mask[y1:y2+1, x1:x2+1]
+
+    plt.imshow(gt_crop)
+    plt.show()
+    plt.imshow(gen_crop)
+    plt.show()
+    
+    # Flatten masked pixels and compute metrics per-channel
+    mse_vals, psnr_vals, ssim_vals = [], [], []
+    for c in range(gen_crop.shape[2]):
+        g = gen_crop[:,:,c][mask_crop]
+        t = gt_crop[:,:,c][mask_crop]
+        mse_vals.append(mean_squared_error(t, g))
+        psnr_vals.append(peak_signal_noise_ratio(t, g, data_range=t.max()-t.min()))
+        ssim_vals.append(structural_similarity(t, g, data_range=t.max()-t.min()))
+    
+    return {
+        "MSE": np.mean(mse_vals),
+        "PSNR": np.mean(psnr_vals),
+        "SSIM": np.mean(ssim_vals)
+    }
 
 # ------------------------------------------------------------------
 # C) Putting it together

@@ -10,6 +10,7 @@ https://developer.nvidia.com/cuda-toolkit
 Pre PyTorch 2.7 a CUDA 12.6:
 V termináli v priečinku s projektom zadaj:
 > conda env create -f environment.yml
+
 > conda activate IGEV_cupy
 
 Následne nainštaluj PyTorch podľa tvojej verzie CUDA Toolkitu. Príkaz pre konkrétnu verziu nájdeš na:  
@@ -39,11 +40,14 @@ Spusti v priečinku s projektom:
 
 # PRÍKLAD PRE 4 KAMERY:
 > python main.py --left dataset/dataset/BL.jpeg --right dataset/dataset/BR.jpeg --resize 0.333 --output output/B5.png
+
 > python main.py --left dataset/dataset/TL.jpeg --right dataset/dataset/TR.jpeg --resize 0.333 --output output/T5.png
+
 > python main.py --left output/B5.png --right output/T5.png --resize 1 --output output/center.png --topdown
 
 # PRÍKLAD PRE HORNÝ A DOLNÝ OBRAZOK:
 > python main.py --left dataset/dataset/BL.jpeg --right dataset/dataset/TL.jpeg --resize 0.333 --output output/L5.png --topdown
+
 > python main.py --left dataset/dataset/BR.jpeg --right dataset/dataset/TR.jpeg --resize 0.333 --output output/T5.png --topdown
 
 # PRÍKLAD PRE POUŽITIE INÉHO MODELU:

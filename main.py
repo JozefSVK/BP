@@ -206,8 +206,8 @@ def func(left_image_path, right_image_path, donwscale=0.5, model='IGEV', top_dow
 
     
 
-    plt.imshow(disparityLR)
-    plt.show()
+    # plt.imshow(disparityLR)
+    # plt.show()
     # save_disparity(disparityLR, 'background.png')
     filter_value = 120
     # disparityLR = filter_disparity_map(disparityLR, filter_value, None, 0)
@@ -403,7 +403,7 @@ if __name__ == "__main__":
         # func('dataset/1/1/0003.png', 'dataset/1/1/0002.png')
         model_name = 'RAFT'
         top_down = True
-        func('dataset/1/2/right.png', 'dataset/1/2/left.png', 1/3, model_name)
+        func('dataset/1/2/left.png', 'dataset/1/2/right.png', 1/3, model_name)
 
         # func('dataset/real/topL.png', 'dataset/real/topR.png', 1, model_name)
         # func('dataset/real/botL.png', 'dataset/real/topL.png', 1, model_name, top_down)

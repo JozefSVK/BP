@@ -5,8 +5,8 @@ from matplotlib import pyplot as plt
 import cupy as cp
 from cupyx import scatter_add
 import math
-import demoChat4
-import demoChat5
+import MediapipeTriangulation
+import MediaPipeUtilities
 
 
 def get_foreground_disparity(disparity):
@@ -103,6 +103,19 @@ def GPU_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5):
     imgIR_cpu = cp.asnumpy(imgIR)
     return imgI_cpu, disparityIL_cpu, disparityIR_cpu, imgIL_cpu, imgIR_cpu
 
+def simple_crack_filling(disparityI):
+    height, width = disparityI.shape[:2]
+    for y in range(height):
+        for x in range(1,width-1):
+            if((disparityI[y,x-1] == -1 or disparityI[y,x+1] == -1) and not 
+                (disparityI[y,x+1] == -1 and disparityI[y,x-1] == -1)): continue
+
+            if ((np.std([disparityI[y,x-1], disparityI[y,x], disparityI[y,x+1]]) > 20 or 
+                disparityI[y,x] == -1) and 
+                np.std([disparityI[y,x-1], disparityI[y,x+1]]) < 3):
+                disparityI[y,x] = np.average([disparityI[y,x-1], disparityI[y,x+1]])
+
+    return disparityI
 
 def fill_disparity_holes_gpu(disparity_map, std_threshold1=20, std_threshold2=3):
     # Transfer to GPU if not already there
@@ -114,6 +127,37 @@ def fill_disparity_holes_gpu(disparity_map, std_threshold1=20, std_threshold2=3)
     if is_3d:
         disparity_map = disparity_map.squeeze()
     
+    # Get left and right neighbors
+    left = disparity_map[:, :-2]
+    center = disparity_map[:, 1:-1]
+    right = disparity_map[:, 2:]
+
+    # Create mask where both neighbors are either valid or both invalid
+    both_neighbors_valid = (left != -1) & (right != -1)
+    both_neighbors_invalid = (left == -1) & (right == -1)
+    use_mask = both_neighbors_valid | both_neighbors_invalid
+
+    # Compute std of full window and of neighbors
+    window = cp.stack([left, center, right], axis=2)
+    std_window = cp.std(window, axis=2)
+    std_neighbors = cp.std(cp.stack([left, right], axis=2), axis=2)
+    avg_neighbors = cp.mean(cp.stack([left, right], axis=2), axis=2)
+
+    # Conditions
+    center_invalid = center == -1
+    high_std = std_window > std_threshold1
+    low_neighbor_std = std_neighbors < std_threshold2
+    fill_mask = use_mask & (high_std | center_invalid) & low_neighbor_std
+
+    # Apply correction
+    center[fill_mask] = avg_neighbors[fill_mask]
+
+    # Restore 3D shape if needed
+    if is_3d:
+        disparity_map = disparity_map[..., None]
+
+    return cp.asnumpy(disparity_map)
+
     # Create rolling windows of size 3
     window = cp.lib.stride_tricks.sliding_window_view(disparity_map, 3, axis=1)
     
@@ -167,6 +211,18 @@ def warp_disparity_gpu(disparityLR, alpha, height, width):
                 disparityIL[y, nx] = new_values[y, x]
     
     return cp.asnumpy(disparityIL)
+
+def backward_warping(img_rgb, disparityI, multiplier, alpha):
+    height, width = img_rgb.shape[:2]
+    imgI = np.zeros((height, width, 3), np.uint8)
+    for y in range(height):
+        for x in range(width):
+            if (disparityI[y, x] >= 0):
+                xPos = (x + multiplier*int(np.round(alpha*disparityI[y, x])))
+                if  -1 < xPos and xPos < width:
+                    imgI[y, x] = img_rgb[y, xPos]
+
+    return imgI
 
 
 def warp_image_cv2(img_rgb, disparityI, multiplier, alpha):
@@ -271,6 +327,25 @@ def generate_intermediate_disparity(disparityLR, alpha, multiplier):
     
     return disparityIL
 
+def forward_warping(disparityMap, alpha, width, height, is_left_disparity):
+    disparityI = np.ones((height, width, 1), np.float32) * -1
+    for y in range(height):
+        for x in range(width):
+            if disparityMap[y, x] > -1:
+                disparity = disparityMap[y, x]
+                if is_left_disparity: # left disparity map
+                    newX = math.floor(x - alpha*disparity)
+                else: # right disparity map
+                    newX = math.floor(x + (1-alpha)*disparity)
+                # skip invalid value
+                if newX < 0 or newX >= width: continue
+                
+                if(disparityI[y,newX] == -1 or disparityI[y,newX] < disparity):
+                    disparityI[y,newX] = disparity
+
+    return disparityI
+
+
 def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, top_down_imgs = False):
     imgL_rgb = cv2.cvtColor(imgL, cv2.COLOR_BGR2RGB)
     imgR_rgb = cv2.cvtColor(imgR, cv2.COLOR_BGR2RGB)
@@ -286,8 +361,8 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
 
     height, width = imgR.shape[:2]
 
-    disparityIL = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
-    disparityIR = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
+    disparityIL = np.ones((height, width, 1), np.float32) * -1
+    disparityIR = np.ones((height, width, 1), np.float32) * -1
 
     # --------------------
     # Detect face in image
@@ -299,12 +374,22 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
         face_imgL = cv2.rotate(face_imgL, cv2.ROTATE_90_COUNTERCLOCKWISE)
         face_imgR = cv2.rotate(face_imgR, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-    faceL = demoChat4.get_face_landmarks(face_imgL)
-    faceR = demoChat4.get_face_landmarks(face_imgR)
+    faceL = MediapipeTriangulation.get_face_landmarks(face_imgL)
+    faceR = MediapipeTriangulation.get_face_landmarks(face_imgR)
+
+    # faceL = None
+    # faceR = None
     
     if faceL is not None and faceR is not None:
+        # plt.imshow(cv2.cvtColor(face_imgL, cv2.COLOR_BGR2RGB))
+        # plt.scatter(faceL[:, 0], faceL[:, 1], s=1, c='lime')
+        # plt.title("MediaPipe – tvárové body")
+        # plt.axis('off')
+        # plt.savefig("obr_mediapipe_body.png", dpi=300, bbox_inches='tight')
+        # plt.show()
+
         def get_head(face_img, face_points):
-            person_mask = demoChat5.segment_head(face_img)
+            person_mask = MediaPipeUtilities.segment_head(face_img)
 
             contour_mask = (person_mask > 0.5).astype(np.uint8) * 255
             person_img = cv2.bitwise_and(face_img, face_img, mask=contour_mask)
@@ -349,16 +434,23 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
         ptsR = np.vstack([faceR, cR])
         pts_mid = ((1-alpha)*ptsL + alpha*ptsR).astype(np.int32)
 
+        # plt.imshow(cv2.cvtColor(face_imgL, cv2.COLOR_BGR2RGB))
+        # plt.scatter(ptsL[:, 0], ptsL[:, 1], s=1, c='orange')
+        # plt.title("Body tváre + kontúra hlavy")
+        # plt.axis('off')
+        # plt.savefig("obr_mediapipe_kontura.png", dpi=300, bbox_inches='tight')
+        # plt.show()
+
         mask_mid = np.zeros(headL.shape[:2], dtype=np.uint8)
         cv2.fillPoly(mask_mid, [pts_mid], 255)
 
-        warp1, warp2 = demoChat4.warp_images(headL, headR, ptsL, ptsR, pts_mid)
+        warp1, warp2 = MediapipeTriangulation.warp_images(headL, headR, ptsL, ptsR, pts_mid)
 
         if not top_down_imgs:
             mid_coord = int(np.median(pts_mid[:,0]))  # legacy left/right
         else:
             mid_coord = int(np.median(pts_mid[:,1]))  # new up/down
-        Wmask = demoChat4.compute_weight_mask(headL.shape, mid_coord, 40, "y" if top_down_imgs else "x")
+        Wmask = MediapipeTriangulation.compute_weight_mask(headL.shape, mid_coord, 40, "y" if top_down_imgs else "x")
         blended = cv2.convertScaleAbs(warp1*(1-Wmask) + warp2*Wmask) 
         blended_mask = np.any(blended > 0, axis=2)  
         
@@ -379,7 +471,38 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
         # disparityLR[diffL > 0] = -1
         # disparityRL[diffR > 0] = -1
 
-        blended = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)   
+        blended = cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)  
+
+        # # Vytvor biele pozadie rovnakej veľkosti
+        # white_bg = np.ones_like(blended) * 255  # RGB biela
+
+        # # Vytvor binárnu masku podľa toho, kde má blended informáciu (napr. nie je úplne čierny pixel)
+        # valid_mask = np.any(blended > 0, axis=2)
+
+        # # Vlož blended do bieleho pozadia
+        # output = white_bg.copy()
+        # output[valid_mask] = blended[valid_mask]
+
+        # ground_truth = cv2.imread("dataset/1/2/0001.png")
+        # ground_truth = cv2.resize(ground_truth, None, fx=1/3, fy=1/3)
+        # blended_valid = blended[valid_mask]  
+        # ground_truth_valid = ground_truth[valid_mask]  # shape (N, 3)
+
+        # # príklad 1: výpočet priemernej absolútnej odchýlky (L1 rozdiel)
+        # mae = np.mean(np.abs(blended_valid.astype(np.float32) - ground_truth_valid.astype(np.float32)))
+        # print(f"Priemerná absolútna odchýlka: {mae:.2f}")
+
+        # # príklad 2: MSE alebo PSNR
+        # mse = np.mean((blended_valid.astype(np.float32) - ground_truth_valid.astype(np.float32))**2)
+        # print(f"MSE: {mse:.2f}")
+
+        # # (voliteľne) PSNR
+        # psnr = 10 * np.log10(255**2 / mse) if mse > 0 else float("inf")
+        # print(f"PSNR: {psnr:.2f} dB")
+
+        # plt.imshow(output)
+        # plt.show()
+        # cv2.imwrite("mediapiepe_Synthesis.png", cv2.cvtColor(output, cv2.COLOR_BGR2RGB)) 
 
         # plt.imshow(blended)
         # plt.show()
@@ -399,40 +522,53 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
     # disparityIL = warp_disparity_gpu(disparityLR, alpha, height, width)
     start = time.time()
     # remove ghosting
-    foreground_disparity = get_foreground_disparity(disparityLR)
-    disparityIL_helper = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
-    for y in range(height):
-        for x in range(width):
-            if(foreground_disparity[y,x]):
-                disparity = foreground_disparity[y, x]
-                newX = math.floor(x - alpha*disparity)
-                newX = max(0, min(newX, width-1))
-                disparityIL_helper[y,newX] = disparity
+    if faceL is not None and faceR is not None:
+        foreground_disparity = get_foreground_disparity(disparityLR)
+        # plt.imshow(foreground_disparity)
+        # plt.show()
+        disparityIL_helper = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
+        for y in range(height):
+            for x in range(width):
+                if(foreground_disparity[y,x]):
+                    disparity = foreground_disparity[y, x]
+                    newX = math.floor(x - alpha*disparity)
+                    newX = max(0, min(newX, width-1))
+                    disparityIL_helper[y,newX] = disparity
 
 
-    disparityIL_helper = fill_disparity_holes_gpu(disparityIL_helper, 20, 3)
-    disparityIL_helper = np.round(disparityIL_helper)
+        disparityIL_helper = fill_disparity_holes_gpu(disparityIL_helper, 20, 3)
+        disparityIL_helper = np.round(disparityIL_helper)
 
-    boundaryLR, diff = detect_EOBMR(disparityLR, 70, 15)
-    # show_boundary(imgL_rgb, boundaryLR)
-    # boundaryIL = detect_EOBMV(disparityIL_helper, 5)
-    combined_boundary = cv2.bitwise_and(boundaryLR, (disparityIL_helper == -1).astype(np.uint8))
+        boundaryLR, diff = detect_EOBMR(disparityLR, 70, 15)
+        # show_boundary(imgL_rgb, boundaryLR)
+        # boundaryIL = detect_EOBMV(disparityIL_helper, 5)
+        combined_boundary = cv2.bitwise_and(boundaryLR, (disparityIL_helper == -1).astype(np.uint8))
 
-    disparityLR[combined_boundary == 1] = 0
+        disparityLR[combined_boundary == 1] = -1
     
-    # disparityIL = generate_intermediate_disparity(disparityLR, alpha, -1)
-    for y in range(height):
-        for x in range(width):
-            if disparityLR[y, x]:
-                disparity = disparityLR[y, x]
-                newX = math.floor(x - alpha*disparity)
-                newX = max(0, min(newX, width-1))
-                disparityIL[y,newX] = disparity
+    start = time.time()
+    disparityIL = generate_intermediate_disparity(disparityLR, alpha, -1)
+    # disparityIL = forward_warping(disparityLR, alpha, width, height, True)
+    print("time taken for complex forward warping " + str(time.time() - start))
+    print("\n")
+
+    # for y in range(height):
+    #     for x in range(width):
+    #         if disparityLR[y, x]:
+    #             disparity = disparityLR[y, x]
+    #             newX = math.floor(x - alpha*disparity)
+    #             # newX = max(0, min(newX, width-1))
+    #             if newX < 0 or newX >= width: continue
+    #             if(disparityIL[y,newX] == -1 or disparityIL[y,newX] < disparity):
+    #                 disparityIL[y,newX] = disparity
     # print("Intermediate disparity " + str(time.time() - start))
 
     # Fill holes
+    start = time.time()
     disparityIL = fill_disparity_holes_gpu(disparityIL, 20, 3)
     # disparityIL_helper = np.round(disparityIL)
+    # print("time taken for complex crack filling " + str(time.time() - start))
+    # print("\n")
     
     # combined_boundary = cv2.bitwise_or(boundaryLR, combined_boundary)
 
@@ -461,44 +597,62 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
     #         if ((np.std([disparityIL[y,x-1], disparityIL[y,x], disparityIL[y,x+1]]) > 20 or disparityIL[y,x] == -1) and np.std([disparityIL[y,x-1], disparityIL[y,x+1]]) < 3):
     #             disparityIL[y,x] = np.average([disparityIL[y,x-1], disparityIL[y,x+1]])
 
-    imgIL = warp_image_cv2(imgL_rgb, disparityIL, 1, alpha)
+    # start = time.time()
+    # disparityIL = simple_crack_filling(disparityIL)
+    # print("time taken for crack filling " + str(time.time() - start))
+    # print("\n")
+
     # disparityIL[combined_boundary == 1] = -1
     # visualize_boundaries(imgIL, boundaryIL, "Boundary IL")
     # visualize_boundaries(imgIL, combined_boundary, "Combined Boundaries")
+
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIL[y, x] >= 0):
-    #             imgIL[y, x] = imgL_rgb[y, x + int(np.round(disparityIL[y, x]))]
+    #             if (x + int(np.round(alpha*disparityIL[y, x]))) < width:
+    #                 imgIL[y, x] = imgL_rgb[y, x + int(np.round(alpha*disparityIL[y, x]))]
+    
+    start = time.time()
+    imgIL = warp_image_cv2(imgL_rgb, disparityIL, 1, alpha)
+    # imgIL = backward_warping(imgL_rgb, disparityIL, 1, alpha)
+    # print("time taken for complex backward wraping " + str(time.time() - start))
+    # print("\n")
 
-    foreground_disparity = get_foreground_disparity(disparityRL)
-    disparityIR_helper = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
-    for y in range(height):
-        for x in range(width):
-            if(foreground_disparity[y,x]):
-                disparity = foreground_disparity[y, x]
-                newX = math.floor(x + (1-alpha)*disparity)
-                newX = max(0, min(newX, width-1))
-                disparityIR_helper[y,newX] = disparity
 
-    disparityIR_helper = fill_disparity_holes_gpu(disparityIR_helper, 20, 3)
-    disparityIR_helper = np.round(disparityIR_helper)
+    if faceL is not None and faceR is not None:
+        foreground_disparity = get_foreground_disparity(disparityRL)
+        disparityIR_helper = np.ones((imgL.shape[0], imgL.shape[1], 1), np.float32) * -1
+        for y in range(height):
+            for x in range(width):
+                if(foreground_disparity[y,x]):
+                    disparity = foreground_disparity[y, x]
+                    newX = math.floor(x + (1-alpha)*disparity)
+                    newX = max(0, min(newX, width-1))
+                    disparityIR_helper[y,newX] = disparity
 
-    # remove ghosting
-    boundaryRL, diff = detect_EOBMR(disparityRL, 70, 15)
-    # boundaryIR = detect_EOBMV(disparityIR_helper, 5)
-    combined_boundary = cv2.bitwise_and(boundaryRL, (disparityIR_helper == -1).astype(np.uint8))
+        disparityIR_helper = fill_disparity_holes_gpu(disparityIR_helper, 20, 3)
+        disparityIR_helper = np.round(disparityIR_helper)
 
-    disparityRL[combined_boundary == 1] = 0
+        # remove ghosting
+        boundaryRL, diff = detect_EOBMR(disparityRL, 70, 15)
+        # boundaryIR = detect_EOBMV(disparityIR_helper, 5)
+        combined_boundary = cv2.bitwise_and(boundaryRL, (disparityIR_helper == -1).astype(np.uint8))
 
-    for y in range(height):
-        for x in range(width-1, -1, -1):
-            if disparityRL[y, x]:
-                disparity = disparityRL[y, x]
-                newX = math.floor(x + (1-alpha)*disparity)
-                newX = max(0, min(newX, width-1))
-                disparityIR[y,newX] = disparity
+        disparityRL[combined_boundary == 1] = -1
+
+    disparityIR = generate_intermediate_disparity(disparityRL, (1-alpha), 1)
+    # disparityIR = forward_warping(disparityRL, alpha, width, height, False)
+    
+    # for y in range(height):
+    #     for x in range(width-1, -1, -1):
+    #         if disparityRL[y, x]:
+    #             disparity = disparityRL[y, x]
+    #             newX = math.floor(x + (1-alpha)*disparity)
+    #             newX = max(0, min(newX, width-1))
+    #             disparityIR[y,newX] = disparity
 
     # Fill holes
+    start = time.time()
     disparityIR = fill_disparity_holes_gpu(disparityIR, 20, 3)
     
     
@@ -511,16 +665,28 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
     #     for x in range(1,width-1):
     #         if ((np.std([disparityIR[y,x-1], disparityIR[y,x], disparityIR[y,x+1]]) > 20 or disparityIR[y,x] == -1) and np.std([disparityIR[y,x-1], disparityIR[y,x+1]]) < 3):
     #             disparityIR[y,x] = np.average([disparityIR[y,x-1], disparityIR[y,x+1]])
-    start = time.time()
+
+    # disparityIR = simple_crack_filling(disparityIR)
+    # print("cracks filling " + str(time.time() - start))
+    # plt.imshow(disparityIL)
+    # plt.show()
+    # plt.imshow(disparityIR)
+    # plt.show()
 
     imgIR = warp_image_cv2(imgR_rgb, disparityIR, -1, (1-alpha))
     # disparityIR[combined_boundary == 1] = -1
     # plt.imshow(imgIR)
     # plt.show()
+    start = time.time()
     # for y in range(height):
     #     for x in range(width):
     #         if (disparityIR[y, x] >= 0):
-    #             imgIR_copy[y, x] = imgR_rgb[y, x - int(np.round(disparityIR[y, x]))]
+    #             if(x - int(np.round((1-alpha)*disparityIR[y, x]))) > -1:
+    #                 imgIR[y, x] = imgR_rgb[y, x - int(np.round((1-alpha)*disparityIR[y, x]))]
+
+
+    # imgIR = backward_warping(imgR_rgb, disparityIR, -1, (1-alpha))
+    # print("imgIR " + str(time.time() - start))
 
     # Compute the absolute difference
     # difference = cv2.absdiff(imgIR, imgIR_copy)
@@ -563,12 +729,27 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
 
     # disparityIR[combined_boundary == 1] = -1
     
-
+    # cv2.imwrite("imgIL.png", cv2.cvtColor(imgIL, cv2.COLOR_BGR2RGB))
+    # cv2.imwrite("imgIR.png", cv2.cvtColor(imgIR, cv2.COLOR_BGR2RGB))
 
     check_pixels = np.zeros((imgL.shape[0], imgL.shape[1], 1), np.uint8)
 
-    start = time.time()
+    # disparity_normalized = (disparityIL - disparityIL.min()) / (disparityIL.max() - disparityIL.min())
+    # # Scale to 0-255 and convert to uint8
+    # disparity_uint8 = (disparity_normalized * 255).astype(np.uint8)
+    # # cv2.imwrite("disparityIL.png", disparity_uint8)
+
+    # disparity_normalized = (disparityIR - disparityIR.min()) / (disparityIR.max() - disparityIR.min())
+    # # Scale to 0-255 and convert to uint8
+    # disparity_uint8 = (disparity_normalized * 255).astype(np.uint8)
+    # cv2.imwrite("disparityIR.png", disparity_uint8)
+
+    # start = time.time()
+    # imgI = merge_views_simple(imgIL, disparityIL, imgIR, disparityIR, alpha)
     imgI = merge_disparity_views(imgIL, imgIR, disparityIL, disparityIR, alpha)
+    # print("time taken for complex merging " + str(time.time() - start))
+    # print("\n")
+
     # for y in range(height):
     #     for x in range(width):
     #         if (not np.array_equal(disparityIL[y, x], [-1]) and not np.array_equal(disparityIR[y, x], [-1])):
@@ -595,8 +776,10 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
     #         elif (not np.array_equal(disparityIR[y, x], [-1])):
     #             imgI[y, x] = imgIR[y, x]
 
-    print("Merging " + str(time.time() - start))
-    if faceL is not None and faceR is not None:
+    # print("Merging " + str(time.time() - start))
+    # return imgI, disparityIL, disparityIR, imgIL, imgIR
+    # start = time.time()
+    if faceL is not None and faceR is not None and not top_down_imgs:
 
         # imgI[blended_mask > 0] = (0.5 * blended[blended_mask > 0] + 0.5 * imgI[blended_mask > 0]).astype(np.uint8)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))  # Adjust size as needed
@@ -612,15 +795,15 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
             blended = cv2.rotate(blended, cv2.ROTATE_90_CLOCKWISE)
             leftover = ((blended_mask > 0) & (disparityIL_helper[:, :, 0] == -1)).astype(np.uint8) * 255
             leftover = (leftover & (disparityIR_helper[:, :, 0] == -1)).astype(np.uint8) * 255
-            plt.imshow(leftover)
-            plt.show()
+            # plt.imshow(leftover)
+            # plt.show()
         else:
             leftover = (blended_mask & (disparityIL_helper[:, :, 0] == -1)).astype(np.uint8) * 255
-            plt.imshow(leftover)
-            plt.show()
+            # plt.imshow(leftover)
+            # plt.show()
             leftover = (leftover & (disparityIR_helper[:, :, 0] == -1)).astype(np.uint8) * 255
-            plt.imshow(leftover)
-            plt.show()
+            # plt.imshow(leftover)
+            # plt.show()
 
         # plt.imshow(blended)
         # plt.show()
@@ -637,8 +820,8 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
                 clean_leftover[labels == label] = 255
         leftover = clean_leftover
 
-        plt.imshow(leftover)
-        plt.show()
+        # plt.imshow(leftover)
+        # plt.show()
 
         # kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15,15))
         # leftover = cv2.morphologyEx(leftover, cv2.MORPH_CLOSE, kernel_close)
@@ -650,6 +833,7 @@ def create_intermediate_view(imgL, imgR, disparityLR, disparityRL, alpha = 0.5, 
         # plt.show()
 
         imgI[leftover > 0] = blended[leftover > 0]
+    # print("Time for media pipe face " + str(time.time() - start))
     return imgI, disparityIL, disparityIR, imgIL, imgIR
 
 
@@ -754,6 +938,34 @@ def refine_boundaries(disparity_map, discontinuity_mask, stable_distance=2):
 
     return refined_map
 
+def merge_views_simple(imgIL, disparityIL, imgIR, disparityIR, alpha):
+    imgI = np.zeros_like(imgIL)
+    height, width = imgIL.shape[:2]
+    for y in range(height):
+        for x in range(width):
+            dL = disparityIL[y, x]
+            dR = disparityIR[y, x]
+            pixL = imgIL[y, x]
+            pixR = imgIR[y, x]
+            if dL == -1 and dR == -1:
+                    continue  # invalid pixel in both views
+            
+            elif dL != -1 and dR != -1:
+                if abs(dL - dR) < 20:
+                    imgI[y, x] = (1 - alpha) * pixL + alpha * pixR  # interpolate
+                elif dL > dR:
+                    imgI[y, x] = pixL  # closer object from left
+                else:
+                    imgI[y, x] = pixR  # closer object from right
+        
+            elif dL != -1:
+                imgI[y, x] = pixL
+        
+            elif dR != -1:
+                imgI[y, x] = pixR
+
+    return imgI
+
 
 def merge_disparity_views(imgIL, imgIR, disparityIL, disparityIR, alpha):
     disparityIL = disparityIL.squeeze()
@@ -811,19 +1023,29 @@ def merge_disparity_views(imgIL, imgIR, disparityIL, disparityIR, alpha):
     return imgI
 
 def blur_boundaries(disparity_map):
-    # Create a mask for valid disparity values
+    original_shape = disparity_map.shape
+    was_3d = False
+
+    # Ak je 3D mapa s jedným kanálom (H, W, 1), konvertuj na 2D
+    if disparity_map.ndim == 3 and disparity_map.shape[2] == 1:
+        disparity_map = disparity_map.squeeze(axis=2)
+        was_3d = True
+
+    # Vytvor masku platných hodnôt
     valid_mask = (disparity_map != -1).astype(np.uint8)
 
-    # Replace -1 with neutral values (e.g., 0) for processing
+    # Nahradenie -1 nulami pre spracovanie
     temp_disparity = np.where(disparity_map == -1, 0, disparity_map).astype(np.float32)
-    if temp_disparity.ndim == 3:
-        temp_disparity = temp_disparity.squeeze()
 
-    # Apply median blur to the valid disparity region
+    # Median blur
     blurred_disparity = cv2.medianBlur(temp_disparity, 5)
 
-    # Restore -1 values using the mask
-    smoothed_disparity = np.where(valid_mask == 1, blurred_disparity[..., np.newaxis], -1)
+    # Vrátenie -1 na neplatné pozície
+    smoothed_disparity = np.where(valid_mask == 1, blurred_disparity, -1)
+
+    # Ak bola pôvodne 3D, pridaj späť dimenziu
+    if was_3d:
+        smoothed_disparity = smoothed_disparity[..., np.newaxis]
 
     return smoothed_disparity
 

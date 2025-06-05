@@ -46,4 +46,3 @@ PRÍKLAD PRE HORNÝ A DOLNÝ OBRAZOK:
 
 PRÍKLAD PRE POUŽITIE INÉHO MODELU:
 >> python main.py --left dataset/1/2/left.png --right dataset/1/2/right.png --resize 0.333 --output output/middle.png --model RAFT
-# BP
